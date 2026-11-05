@@ -45,6 +45,7 @@ class MainActivity : Activity() {
     private var unlocked = false
     private var current = ""
     private var stoppedAt = 0L
+    private var skipNextResumeRefresh = false
 
     // متتبّع خفيف يعمل فقط أثناء فتح شاشة الإعدادات: يحفظ أي إشارة GPS موثوقة فوراً،
     // ويرفعها للسحابة إن كان الاتصال السحابي مفعّلاً، بدل الاعتماد فقط على لحظة رد SMS.
@@ -105,16 +106,33 @@ class MainActivity : Activity() {
             !unlocked -> "lock"
             else -> "settings"
         }
-        if (want != current) {
+        if (skipNextResumeRefresh) {
+            // تم بالفعل إعادة رسم الشاشة داخل onRequestPermissionsResult بعد إذن
+            // الكاميرا/الميكروفون؛ تجاهل إعادة الرسم المكرّرة هنا كي لا يُعاد
+            // ScrollView من الصفر وترجع القائمة لأعلاها.
+            skipNextResumeRefresh = false
+            current = want
+        } else if (want != current) {
             current = want
             when (want) { "setup" -> renderSetup(); "lock" -> renderLock(); else -> renderSettings() }
         } else if (want == "setup" || want == "settings") refresh() else showStatus()
-        if (want == "settings") startLiveTracking() else stopLiveTracking()
+        if (want == "settings") {
+            startLiveTracking()
+            if (FirebaseAuth.getInstance().currentUser != null) {
+                MediaSessionService.startListening(this)
+            }
+        } else stopLiveTracking()
     }
 
     override fun onStop() { super.onStop(); stoppedAt = System.currentTimeMillis(); stopLiveTracking() }
 
-    override fun onDestroy() { sendJob?.cancel(); pairReg?.remove(); stopLiveTracking(); super.onDestroy() }
+    override fun onDestroy() {
+        sendJob?.cancel()
+        pairReg?.remove()
+        mediaStatusReg?.remove()
+        stopLiveTracking()
+        super.onDestroy()
+    }
 
     // ---------- أدوات مساعدة ----------
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
@@ -318,6 +336,7 @@ class MainActivity : Activity() {
         root.addView(ownerCard())
         root.addView(viewerCard())
         root.addView(mediaConsentCard())
+        root.addView(mediaControlCard())
 
         val kw = et("مثال: 123456789", s.keyword)
         root.addView(card(
@@ -374,6 +393,7 @@ class MainActivity : Activity() {
 
     // ---------- الاقتران وعرض الموقع عبر السحابة ----------
     private var pairReg: ListenerRegistration? = null
+    private var mediaStatusReg: ListenerRegistration? = null
 
     private fun withUid(onUid: (String) -> Unit, onFail: (String) -> Unit) {
         val auth = FirebaseAuth.getInstance()
@@ -639,13 +659,14 @@ class MainActivity : Activity() {
                 "deviceName" to "${Build.MANUFACTURER} ${Build.MODEL}",
                 "platform" to "android",
                 "registeredAt" to com.google.firebase.firestore.FieldValue.serverTimestamp(),
-                "appVersion" to "1.1"
+                "appVersion" to "1.2"
             )
             FirebaseFirestore.getInstance().collection("devices").document(uid)
                 .set(device, SetOptions.merge())
                 .addOnSuccessListener {
                     status.text = "✓ تم تفعيل الاتصال السحابي لهذا الهاتف."
                     toast("تم تسجيل هذا الهاتف دون بريد إلكتروني")
+                    MediaSessionService.startListening(this@MainActivity)
                 }
                 .addOnFailureListener { e ->
                     status.text = "تعذّر حفظ بيانات الجهاز: ${e.localizedMessage}"
@@ -721,8 +742,120 @@ class MainActivity : Activity() {
         }
         return card(
             sectionTitle("التحكم في الوصول إلى الكاميرا والميكروفون"),
-            label("هذه مفاتيح موافقة محلية على الجهاز المقترن. إيقاف المفتاح يمنع التطبيق من اعتبار الوسيلة مسموحًا بها. يلزم منح إذن Android أيضًا. لا يبدأ تشغيل الوسائط أو البث بمجرد تفعيل المفتاح."),
+            label("مفاتيح موافقة محلية على هذا الجهاز. عند وصول أمر عن بُعد يتحقق التطبيق منها قبل فتح الكاميرا أو الميكروفون. يلزم أيضاً منح إذن Android. فعّل المفتاح المناسب ثم اضغط «بدء استماع الأوامر» في البطاقة التالية."),
             camera, microphone
+        )
+    }
+
+    /**
+     * بطاقة التحكم عن بُعد: ترسل أوامر فتح/إيقاف الكاميرا والميكروفون
+     * إلى هاتف مقترن عبر Firestore، وتعرض حالة الجلسة.
+     */
+    private fun mediaControlCard(): View {
+        val statusTv = TextView(this).apply {
+            textSize = 13f
+            setTextColor(col(R.color.text_sub))
+            setPadding(dp(2), dp(8), dp(2), dp(4))
+            text = "اختر هاتفاً مرتبطاً ثم اطلب فتح الكاميرا أو الميكروفون."
+        }
+        val targetInfo = TextView(this).apply {
+            textSize = 14f
+            setTextColor(col(R.color.text_main))
+            setPadding(dp(2), dp(4), dp(2), dp(8))
+            text = "لم يُحدد هاتف بعد"
+        }
+        // نحتفظ بآخر targetUid مختار
+        var selectedOwnerUid: String? = null
+        var selectedOwnerName: String = ""
+
+        fun refreshStatusListener(ownerUid: String) {
+            mediaStatusReg?.remove()
+            mediaStatusReg = FirebaseFirestore.getInstance().collection("media").document(ownerUid)
+                .addSnapshotListener { snap, _ ->
+                    if (snap == null || !snap.exists()) {
+                        statusTv.text = "لا توجد جلسة وسائط بعد."
+                        return@addSnapshotListener
+                    }
+                    val st = snap.getString("status") ?: "—"
+                    val msg = snap.getString("message") ?: ""
+                    val mode = snap.getString("mode") ?: ""
+                    val req = snap.getString("requesterName") ?: ""
+                    statusTv.text = when (st) {
+                        "pending" -> "بانتظار الجهاز الهدف… $msg"
+                        "active" -> "نشطة ($mode): $msg"
+                        "denied" -> "مرفوضة: $msg"
+                        "stopped" -> "متوقفة: $msg"
+                        "error" -> "خطأ: $msg"
+                        else -> "$st — $msg" + if (req.isNotEmpty()) " (من $req)" else ""
+                    }
+                }
+        }
+
+        fun pickOwnerAnd(cmd: String) {
+            withUid({ me ->
+                FirebaseFirestore.getInstance().collection("devices").document(me).collection("owners").get()
+                    .addOnSuccessListener { qs ->
+                        if (qs.isEmpty) {
+                            toast("لا يوجد هاتف مقترن. أنشئ كوداً على الهاتف الآخر ثم اقترن به.")
+                            return@addOnSuccessListener
+                        }
+                        val names = qs.documents.map { it.getString("name") ?: it.id.take(8) }
+                        val ids = qs.documents.map { it.id }
+                        AlertDialog.Builder(this)
+                            .setTitle("اختر الهاتف الهدف")
+                            .setItems(names.toTypedArray()) { _, which ->
+                                selectedOwnerUid = ids[which]
+                                selectedOwnerName = names[which]
+                                targetInfo.text = "الهدف: $selectedOwnerName"
+                                refreshStatusListener(ids[which])
+                                CloudSync.sendMediaCommand(
+                                    targetUid = ids[which],
+                                    command = cmd,
+                                    requesterName = deviceLabel(),
+                                    onOk = {
+                                        toast(
+                                            when (cmd) {
+                                                "camera" -> "أُرسل طلب فتح الكاميرا"
+                                                "mic" -> "أُرسل طلب فتح الميكروفون"
+                                                else -> "أُرسل طلب الإيقاف"
+                                            }
+                                        )
+                                    },
+                                    onFail = { err -> toast("فشل: $err") }
+                                )
+                            }
+                            .setNegativeButton("إلغاء", null)
+                            .show()
+                    }
+                    .addOnFailureListener { e -> toast("تعذّر تحميل الهواتف: ${e.localizedMessage}") }
+            }, { toast("فعّل الاتصال السحابي أولاً") })
+        }
+
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(6) }
+        }
+        row.addView(iconBtn("فتح كاميرا", R.color.primary) { pickOwnerAnd("camera") })
+        row.addView(iconBtn("فتح ميكروفون", R.color.accent) { pickOwnerAnd("mic") })
+        row.addView(iconBtn("إيقاف", R.color.danger) { pickOwnerAnd("stop") })
+
+        return card(
+            sectionTitle("فتح الكاميرا والميكروفون عن بُعد"),
+            label("يعمل بعد الاقتران وموافقة صاحب الهاتف. يفتح العتاد على الجهاز الهدف ويظهر مؤشر النظام. البث المباشر للصوت/الفيديو عبر الشبكة غير مضمّن في هذه النسخة (يتطلب WebRTC)."),
+            targetInfo,
+            row,
+            statusTv,
+            mbtn("بدء استماع الأوامر على هذا الهاتف", filled = false) {
+                if (FirebaseAuth.getInstance().currentUser == null) {
+                    toast("فعّل الاتصال السحابي أولاً")
+                } else {
+                    MediaSessionService.startListening(this)
+                    toast("جاري الاستماع لأوامر الوسائط في الخلفية")
+                }
+            }
         )
     }
 
@@ -932,6 +1065,7 @@ class MainActivity : Activity() {
             s.allowRemoteCamera = res.isNotEmpty() && res[0] == PackageManager.PERMISSION_GRANTED
             toast(if (s.allowRemoteCamera) "تم السماح بطلب الكاميرا" else "لم يتم منح إذن الكاميرا")
             current = "settings"
+            skipNextResumeRefresh = true
             renderSettings()
             return
         }
@@ -939,6 +1073,7 @@ class MainActivity : Activity() {
             s.allowRemoteMicrophone = res.isNotEmpty() && res[0] == PackageManager.PERMISSION_GRANTED
             toast(if (s.allowRemoteMicrophone) "تم السماح بطلب الميكروفون" else "لم يتم منح إذن الميكروفون")
             current = "settings"
+            skipNextResumeRefresh = true
             renderSettings()
             return
         }
