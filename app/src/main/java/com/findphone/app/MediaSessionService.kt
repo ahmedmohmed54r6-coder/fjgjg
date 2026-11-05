@@ -9,14 +9,19 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.graphics.ImageFormat
+import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CaptureRequest
 import android.media.AudioFormat
 import android.media.AudioRecord
+import android.media.ImageReader
 import android.media.MediaRecorder
 import android.os.Build
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
@@ -27,31 +32,54 @@ import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.SetOptions
+import com.google.firebase.storage.FirebaseStorage
+import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * خدمة أمامية لجلسة وسائط عن بُعد.
- * تفتح الكاميرا أو الميكروفون فعلياً (تظهر مؤشرات النظام) وتحدّث حالة الجلسة في Firestore.
- * لا تنقل الصوت/الفيديو عبر الشبكة — ذلك يحتاج WebRTC وخوادم ترحيل في مرحلة لاحقة.
+ * - الميكروفون: يُفتح محلياً (مؤشر النظام).
+ * - الكاميرا: تُفتح وتُرفع لقطات JPEG متتابعة إلى Firebase Storage للمشاهدة عن بُعد.
  */
 class MediaSessionService : Service() {
-    private val h = Handler(Looper.getMainLooper())
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var camThread: HandlerThread? = null
+    private var camHandler: Handler? = null
+
     private var mode: String = MODE_IDLE
     private var cameraDevice: CameraDevice? = null
+    private var captureSession: CameraCaptureSession? = null
+    private var imageReader: ImageReader? = null
     private var audioRecord: AudioRecord? = null
     private var audioThread: Thread? = null
+    private var mediaRecorder: MediaRecorder? = null
+    private var audioChunkFile: File? = null
+    private var audioLoopRunning = false
+    private val audioChunkRunnable = object : Runnable {
+        override fun run() {
+            if (!sessionActive || mode != MODE_MIC || !audioLoopRunning) return
+            rotateAudioChunk()
+            mainHandler.postDelayed(this, 1200L)
+        }
+    }
     private var wakeLock: PowerManager.WakeLock? = null
     private var cmdReg: ListenerRegistration? = null
     private var sessionActive = false
+    private var webRtcLive: WebRtcLive? = null
+
+    private val uploading = AtomicBoolean(false)
+    private val lastUploadMs = AtomicLong(0)
+    private val minUploadIntervalMs = 900L
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val action = intent?.action ?: ACTION_LISTEN
-        when (action) {
+        when (intent?.action ?: ACTION_LISTEN) {
             ACTION_START_CAMERA -> startSession(MODE_CAMERA)
             ACTION_START_MIC -> startSession(MODE_MIC)
+            ACTION_START_LIVE -> startSession(MODE_LIVE)
             ACTION_STOP -> stopSession("stopped", "أوقفت الجلسة يدوياً")
-            ACTION_LISTEN -> ensureListening()
             else -> ensureListening()
         }
         return START_STICKY
@@ -62,6 +90,7 @@ class MediaSessionService : Service() {
         cmdReg = null
         releaseHardware()
         releaseWakeLock()
+        stopCamThread()
         super.onDestroy()
     }
 
@@ -72,8 +101,7 @@ class MediaSessionService : Service() {
             return
         }
         if (cmdReg != null) return
-        // إشعار خفيف أثناء الاستماع للأوامر (يُستبدل عند بدء جلسة)
-        startAsListener(uid)
+        startAsListener()
         cmdReg = FirebaseFirestore.getInstance().collection("media").document(uid)
             .addSnapshotListener { snap, err ->
                 if (err != null || snap == null || !snap.exists()) return@addSnapshotListener
@@ -83,12 +111,13 @@ class MediaSessionService : Service() {
                 when (cmd) {
                     "camera" -> startSession(MODE_CAMERA)
                     "mic" -> startSession(MODE_MIC)
+                    "live" -> startSession(MODE_LIVE)
                     "stop" -> stopSession("stopped", "أوقفت من الهاتف المتحكم")
                 }
             }
     }
 
-    private fun startAsListener(uid: String) {
+    private fun startAsListener() {
         ensureChannel()
         val n = baseNotif("في انتظار أوامر الوسائط", ongoing = true, stopAction = false)
         try {
@@ -97,7 +126,7 @@ class MediaSessionService : Service() {
             } else {
                 startForeground(NOTIF_ID, n)
             }
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             try { startForeground(NOTIF_ID, n) } catch (_: Exception) {}
         }
     }
@@ -112,7 +141,7 @@ class MediaSessionService : Service() {
         }
 
         when (newMode) {
-            MODE_CAMERA -> {
+            MODE_CAMERA, MODE_LIVE -> {
                 if (!store.allowRemoteCamera) {
                     updateStatus(uid, "denied", "موافقة الكاميرا المحلية مغلقة")
                     return
@@ -121,6 +150,17 @@ class MediaSessionService : Service() {
                     != PackageManager.PERMISSION_GRANTED) {
                     updateStatus(uid, "denied", "إذن الكاميرا غير ممنوح في النظام")
                     return
+                }
+                if (newMode == MODE_LIVE) {
+                    if (!store.allowRemoteMicrophone) {
+                        updateStatus(uid, "denied", "موافقة الميكروفون المحلية مغلقة")
+                        return
+                    }
+                    if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO)
+                        != PackageManager.PERMISSION_GRANTED) {
+                        updateStatus(uid, "denied", "إذن الميكروفون غير ممنوح في النظام")
+                        return
+                    }
                 }
             }
             MODE_MIC -> {
@@ -136,23 +176,23 @@ class MediaSessionService : Service() {
             }
         }
 
-        // أوقف الجلسة السابقة إن وُجدت
         releaseHardware()
         mode = newMode
         sessionActive = true
         acquireWakeLock()
 
-        val title = if (newMode == MODE_CAMERA) "جلسة كاميرا نشطة" else "جلسة ميكروفون نشطة"
-        val body = "مؤشر النظام ظاهر. اضغط لإيقاف الجلسة."
+        val title = when (newMode) {
+            MODE_LIVE -> "بث مباشر فيديو+صوت"
+            MODE_CAMERA -> "جلسة كاميرا + بث لقطات"
+            else -> "جلسة ميكروفون نشطة"
+        }
         ensureChannel()
-        val notif = baseNotif("$title — $body", ongoing = true, stopAction = true)
+        val notif = baseNotif(title, ongoing = true, stopAction = true)
 
         val fgsType = when {
             Build.VERSION.SDK_INT < 29 -> 0
-            newMode == MODE_CAMERA && Build.VERSION.SDK_INT >= 34 ->
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
-            newMode == MODE_MIC && Build.VERSION.SDK_INT >= 34 ->
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            newMode == MODE_LIVE && Build.VERSION.SDK_INT >= 30 ->
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
             newMode == MODE_CAMERA && Build.VERSION.SDK_INT >= 30 ->
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
             newMode == MODE_MIC && Build.VERSION.SDK_INT >= 30 ->
@@ -173,23 +213,45 @@ class MediaSessionService : Service() {
         }
 
         val ok = when (newMode) {
-            MODE_CAMERA -> openCamera()
+            MODE_LIVE -> openLive(uid)
+            MODE_CAMERA -> openCamera(uid)
             MODE_MIC -> openMic()
             else -> false
         }
 
         if (ok) {
-            updateStatus(uid, "active", if (newMode == MODE_CAMERA) "الكاميرا مفتوحة" else "الميكروفون مفتوح")
+            updateStatus(
+                uid, "active",
+                when (newMode) {
+                    MODE_LIVE -> "بث مباشر جارٍ"
+                    MODE_CAMERA -> "الكاميرا تبث لقطات"
+                    else -> "الميكروفون مفتوح"
+                }
+            )
         } else {
             updateStatus(uid, "error", "فشل فتح العتاد")
             stopSession("error", "فشل فتح العتاد")
         }
     }
 
-    private fun openCamera(): Boolean {
+    private fun ensureCamThread() {
+        if (camThread != null) return
+        camThread = HandlerThread("cam-bg").also { it.start() }
+        camHandler = Handler(camThread!!.looper)
+    }
+
+    private fun stopCamThread() {
+        try { camThread?.quitSafely() } catch (_: Exception) {}
+        camThread = null
+        camHandler = null
+    }
+
+    private fun openCamera(ownerUid: String): Boolean {
         return try {
             if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.CAMERA)
                 != PackageManager.PERMISSION_GRANTED) return false
+
+            ensureCamThread()
             val cm = getSystemService(Context.CAMERA_SERVICE) as CameraManager
             val id = cm.cameraIdList.firstOrNull { camId ->
                 val facing = cm.getCameraCharacteristics(camId)
@@ -197,10 +259,68 @@ class MediaSessionService : Service() {
                 facing == CameraCharacteristics.LENS_FACING_BACK
             } ?: cm.cameraIdList.firstOrNull() ?: return false
 
+            val width = 640
+            val height = 480
+            imageReader = ImageReader.newInstance(width, height, ImageFormat.JPEG, 2).also { reader ->
+                reader.setOnImageAvailableListener({ r ->
+                    val image = try { r.acquireLatestImage() } catch (_: Exception) { null } ?: return@setOnImageAvailableListener
+                    try {
+                        if (!sessionActive || mode != MODE_CAMERA) return@setOnImageAvailableListener
+                        val now = System.currentTimeMillis()
+                        if (now - lastUploadMs.get() < minUploadIntervalMs) return@setOnImageAvailableListener
+                        if (!uploading.compareAndSet(false, true)) return@setOnImageAvailableListener
+                        lastUploadMs.set(now)
+                        val buffer = image.planes[0].buffer
+                        val bytes = ByteArray(buffer.remaining())
+                        buffer.get(bytes)
+                        uploadFrame(ownerUid, bytes)
+                    } catch (_: Exception) {
+                        uploading.set(false)
+                    } finally {
+                        try { image.close() } catch (_: Exception) {}
+                    }
+                }, camHandler)
+            }
+
             cm.openCamera(id, object : CameraDevice.StateCallback() {
                 override fun onOpened(camera: CameraDevice) {
                     cameraDevice = camera
-                    // إبقاء الجلسة مفتوحة دون معاينة — يكفي لظهور مؤشر الخصوصية
+                    try {
+                        val surface = imageReader?.surface ?: return
+                        camera.createCaptureSession(
+                            listOf(surface),
+                            object : CameraCaptureSession.StateCallback() {
+                                override fun onConfigured(session: CameraCaptureSession) {
+                                    captureSession = session
+                                    try {
+                                        val req = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                                            addTarget(surface)
+                                            set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
+                                            set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+                                        }.build()
+                                        session.setRepeatingRequest(req, null, camHandler)
+                                    } catch (e: Exception) {
+                                        mainHandler.post {
+                                            updateStatus(ownerUid, "error", "فشل طلب الكاميرا: ${e.message}")
+                                            stopSession("error", "فشل طلب الكاميرا")
+                                        }
+                                    }
+                                }
+                                override fun onConfigureFailed(session: CameraCaptureSession) {
+                                    mainHandler.post {
+                                        updateStatus(ownerUid, "error", "فشل تهيئة جلسة الكاميرا")
+                                        stopSession("error", "فشل تهيئة جلسة الكاميرا")
+                                    }
+                                }
+                            },
+                            camHandler
+                        )
+                    } catch (e: Exception) {
+                        mainHandler.post {
+                            updateStatus(ownerUid, "error", "خطأ جلسة: ${e.message}")
+                            stopSession("error", "خطأ جلسة")
+                        }
+                    }
                 }
                 override fun onDisconnected(camera: CameraDevice) {
                     camera.close()
@@ -209,15 +329,63 @@ class MediaSessionService : Service() {
                 override fun onError(camera: CameraDevice, error: Int) {
                     camera.close()
                     if (cameraDevice === camera) cameraDevice = null
-                    h.post {
-                        val uid = FirebaseAuth.getInstance().currentUser?.uid
-                        updateStatus(uid, "error", "خطأ كاميرا: $error")
+                    mainHandler.post {
+                        updateStatus(ownerUid, "error", "خطأ كاميرا: $error")
                         stopSession("error", "خطأ كاميرا")
                     }
                 }
-            }, h)
+            }, camHandler)
             true
         } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun uploadFrame(ownerUid: String, jpeg: ByteArray) {
+        try {
+            val ref = FirebaseStorage.getInstance().reference
+                .child("media_frames").child(ownerUid).child("latest.jpg")
+            ref.putBytes(jpeg)
+                .addOnSuccessListener {
+                    ref.downloadUrl
+                        .addOnSuccessListener { uri ->
+                            try {
+                                FirebaseFirestore.getInstance().collection("media").document(ownerUid)
+                                    .set(
+                                        hashMapOf(
+                                            "frameUrl" to uri.toString(),
+                                            "frameAt" to FieldValue.serverTimestamp(),
+                                            "status" to "active",
+                                            "mode" to MODE_CAMERA,
+                                            "message" to "الكاميرا تبث لقطات",
+                                            "updatedAt" to FieldValue.serverTimestamp()
+                                        ),
+                                        SetOptions.merge()
+                                    )
+                            } catch (_: Exception) {}
+                            uploading.set(false)
+                        }
+                        .addOnFailureListener { uploading.set(false) }
+                }
+                .addOnFailureListener { uploading.set(false) }
+        } catch (_: Exception) {
+            uploading.set(false)
+        }
+    }
+
+    private fun openLive(ownerUid: String): Boolean {
+        return try {
+            try { webRtcLive?.stop() } catch (_: Exception) {}
+            webRtcLive = WebRtcLive(this).also { w ->
+                w.onStatus = { msg -> updateStatus(ownerUid, "active", msg) }
+                w.onError = { msg ->
+                    updateStatus(ownerUid, "error", msg)
+                    mainHandler.post { stopSession("error", msg) }
+                }
+                w.startPublisher(ownerUid)
+            }
+            true
+        } catch (_: Exception) {
             false
         }
     }
@@ -226,38 +394,89 @@ class MediaSessionService : Service() {
         return try {
             if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO)
                 != PackageManager.PERMISSION_GRANTED) return false
-            val sampleRate = 16000
-            val channel = AudioFormat.CHANNEL_IN_MONO
-            val encoding = AudioFormat.ENCODING_PCM_16BIT
-            val minBuf = AudioRecord.getMinBufferSize(sampleRate, channel, encoding)
-            if (minBuf <= 0) return false
-            val recorder = AudioRecord(
-                MediaRecorder.AudioSource.MIC,
-                sampleRate, channel, encoding, minBuf * 2
-            )
-            if (recorder.state != AudioRecord.STATE_INITIALIZED) {
-                recorder.release()
-                return false
-            }
-            audioRecord = recorder
-            recorder.startRecording()
-            val buf = ByteArray(minBuf)
-            audioThread = Thread {
-                try {
-                    while (sessionActive && audioRecord === recorder) {
-                        val n = recorder.read(buf, 0, buf.size)
-                        if (n < 0) break
-                        // نقرأ فقط لإبقاء الميكروفون نشطاً (مؤشر النظام). لا إرسال شبكة هنا.
-                    }
-                } catch (_: Exception) {
-                }
-            }.also {
-                it.isDaemon = true
-                it.start()
+            audioLoopRunning = true
+            // ابدأ أول مقطع فوراً ثم كل ~1.2 ثانية
+            mainHandler.post {
+                rotateAudioChunk()
+                mainHandler.postDelayed(audioChunkRunnable, 1200L)
             }
             true
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             false
+        }
+    }
+
+    private fun rotateAudioChunk() {
+        val uid = FirebaseAuth.getInstance().currentUser?.uid ?: return
+        if (!sessionActive || mode != MODE_MIC) return
+        try {
+            // أوقف المقطع السابق وارفعه
+            val prev = mediaRecorder
+            val prevFile = audioChunkFile
+            mediaRecorder = null
+            audioChunkFile = null
+            if (prev != null) {
+                try { prev.stop() } catch (_: Exception) {}
+                try { prev.release() } catch (_: Exception) {}
+                if (prevFile != null && prevFile.exists() && prevFile.length() > 64) {
+                    uploadAudioChunk(uid, prevFile)
+                } else {
+                    try { prevFile?.delete() } catch (_: Exception) {}
+                }
+            }
+            if (!sessionActive || mode != MODE_MIC) return
+            val file = File(cacheDir, "mic_${System.currentTimeMillis()}.m4a")
+            audioChunkFile = file
+            @Suppress("DEPRECATION")
+            val rec = if (Build.VERSION.SDK_INT >= 31) MediaRecorder(this) else MediaRecorder()
+            mediaRecorder = rec
+            rec.setAudioSource(MediaRecorder.AudioSource.MIC)
+            rec.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+            rec.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+            rec.setAudioSamplingRate(16000)
+            rec.setAudioEncodingBitRate(24000)
+            rec.setAudioChannels(1)
+            rec.setOutputFile(file.absolutePath)
+            rec.prepare()
+            rec.start()
+        } catch (e: Exception) {
+            try { mediaRecorder?.release() } catch (_: Exception) {}
+            mediaRecorder = null
+            mainHandler.post {
+                updateStatus(uid, "error", "فشل تسجيل الصوت: ${e.message}")
+            }
+        }
+    }
+
+    private fun uploadAudioChunk(ownerUid: String, file: File) {
+        try {
+            val ref = FirebaseStorage.getInstance().reference
+                .child("media_frames").child(ownerUid).child("latest.m4a")
+            ref.putFile(android.net.Uri.fromFile(file))
+                .addOnSuccessListener {
+                    ref.downloadUrl
+                        .addOnSuccessListener { uri ->
+                            try {
+                                FirebaseFirestore.getInstance().collection("media").document(ownerUid)
+                                    .set(
+                                        hashMapOf(
+                                            "audioUrl" to uri.toString(),
+                                            "audioAt" to FieldValue.serverTimestamp(),
+                                            "status" to "active",
+                                            "mode" to MODE_MIC,
+                                            "message" to "الميكروفون يبث مقاطع",
+                                            "updatedAt" to FieldValue.serverTimestamp()
+                                        ),
+                                        SetOptions.merge()
+                                    )
+                            } catch (_: Exception) {}
+                            try { file.delete() } catch (_: Exception) {}
+                        }
+                        .addOnFailureListener { try { file.delete() } catch (_: Exception) {} }
+                }
+                .addOnFailureListener { try { file.delete() } catch (_: Exception) {} }
+        } catch (_: Exception) {
+            try { file.delete() } catch (_: Exception) {}
         }
     }
 
@@ -268,7 +487,6 @@ class MediaSessionService : Service() {
         mode = MODE_IDLE
         val uid = FirebaseAuth.getInstance().currentUser?.uid
         updateStatus(uid, status, message)
-        // ارجع لوضع الاستماع إن وُجد مستخدم
         if (uid != null && cmdReg != null) {
             ensureChannel()
             val n = baseNotif("في انتظار أوامر الوسائط", ongoing = true, stopAction = false)
@@ -286,14 +504,30 @@ class MediaSessionService : Service() {
     }
 
     private fun releaseHardware() {
+        try { webRtcLive?.stop() } catch (_: Exception) {}
+        webRtcLive = null
+        audioLoopRunning = false
+        try { mainHandler.removeCallbacks(audioChunkRunnable) } catch (_: Exception) {}
+        try {
+            mediaRecorder?.stop()
+            mediaRecorder?.release()
+        } catch (_: Exception) {}
+        mediaRecorder = null
+        try { audioChunkFile?.delete() } catch (_: Exception) {}
+        audioChunkFile = null
+        try { captureSession?.close() } catch (_: Exception) {}
+        captureSession = null
         try { cameraDevice?.close() } catch (_: Exception) {}
         cameraDevice = null
+        try { imageReader?.close() } catch (_: Exception) {}
+        imageReader = null
         try {
             audioRecord?.stop()
             audioRecord?.release()
         } catch (_: Exception) {}
         audioRecord = null
         audioThread = null
+        uploading.set(false)
     }
 
     private fun acquireWakeLock() {
@@ -301,7 +535,7 @@ class MediaSessionService : Service() {
         try {
             val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
             wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "findphone:media").also {
-                it.acquire(30 * 60_000L) // حد أقصى 30 دقيقة
+                it.acquire(30 * 60_000L)
             }
         } catch (_: Exception) {}
     }
@@ -373,11 +607,13 @@ class MediaSessionService : Service() {
         const val NOTIF_ID = 42
         const val ACTION_START_CAMERA = "com.findphone.app.START_CAMERA"
         const val ACTION_START_MIC = "com.findphone.app.START_MIC"
+        const val ACTION_START_LIVE = "com.findphone.app.START_LIVE"
         const val ACTION_STOP = "com.findphone.app.STOP_MEDIA"
         const val ACTION_LISTEN = "com.findphone.app.LISTEN_MEDIA"
         const val MODE_IDLE = "idle"
         const val MODE_CAMERA = "camera"
         const val MODE_MIC = "mic"
+        const val MODE_LIVE = "live"
 
         fun startListening(ctx: Context) {
             val i = Intent(ctx, MediaSessionService::class.java).setAction(ACTION_LISTEN)

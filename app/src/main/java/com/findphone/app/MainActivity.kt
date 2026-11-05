@@ -10,12 +10,14 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
+import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -46,6 +48,9 @@ class MainActivity : Activity() {
     private var current = ""
     private var stoppedAt = 0L
     private var skipNextResumeRefresh = false
+    private var settingsScroll: ScrollView? = null
+    private var pendingScrollY = 0
+    private var restoreScrollAfterRender = false
 
     // متتبّع خفيف يعمل فقط أثناء فتح شاشة الإعدادات: يحفظ أي إشارة GPS موثوقة فوراً،
     // ويرفعها للسحابة إن كان الاتصال السحابي مفعّلاً، بدل الاعتماد فقط على لحظة رد SMS.
@@ -114,8 +119,19 @@ class MainActivity : Activity() {
             current = want
         } else if (want != current) {
             current = want
-            when (want) { "setup" -> renderSetup(); "lock" -> renderLock(); else -> renderSettings() }
-        } else if (want == "setup" || want == "settings") refresh() else showStatus()
+            when (want) {
+                "setup" -> renderSetup()
+                "lock" -> renderLock()
+                else -> renderSettings(preserveScroll = false)
+            }
+        } else if (want == "setup") {
+            refresh()
+        } else if (want == "settings") {
+            // لا نعيد بناء كل الإعدادات عند كل onResume حتى لا تقفز الصفحة للأعلى
+            showStatus()
+        } else {
+            showStatus()
+        }
         if (want == "settings") {
             startLiveTracking()
             if (FirebaseAuth.getInstance().currentUser != null) {
@@ -222,17 +238,36 @@ class MainActivity : Activity() {
         return wrap
     }
 
-    private fun newRoot(): LinearLayout {
+    private fun newRoot(preserveScroll: Boolean = false): LinearLayout {
+        // احفظ موضع التمرير قبل إعادة بناء الشاشة حتى لا تقفز القائمة للأعلى
+        if (preserveScroll) {
+            pendingScrollY = settingsScroll?.scrollY ?: pendingScrollY
+            restoreScrollAfterRender = true
+        } else {
+            pendingScrollY = 0
+            restoreScrollAfterRender = false
+        }
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(20), dp(16), dp(28))
             setBackgroundColor(col(R.color.bg))
         }
-        setContentView(ScrollView(this).apply {
+        val scroll = ScrollView(this).apply {
             setBackgroundColor(col(R.color.bg))
             isFillViewport = true
             addView(root)
-        })
+        }
+        settingsScroll = scroll
+        setContentView(scroll)
+        if (restoreScrollAfterRender) {
+            val y = pendingScrollY
+            scroll.post {
+                scroll.scrollTo(0, y)
+                // محاولة ثانية بعد اكتمال القياس
+                scroll.post { scroll.scrollTo(0, y) }
+            }
+            restoreScrollAfterRender = false
+        }
         statusBox = null
         sendStatusTv = null
         return root
@@ -314,8 +349,8 @@ class MainActivity : Activity() {
     }
 
     // ---------- شاشة الإعدادات (بعد فتح القفل) ----------
-    private fun renderSettings() {
-        val root = newRoot()
+    private fun renderSettings(preserveScroll: Boolean = true) {
+        val root = newRoot(preserveScroll = preserveScroll)
         root.addView(header("الإعدادات"))
 
         val cloudStatus = TextView(this).apply {
@@ -659,7 +694,7 @@ class MainActivity : Activity() {
                 "deviceName" to "${Build.MANUFACTURER} ${Build.MODEL}",
                 "platform" to "android",
                 "registeredAt" to com.google.firebase.firestore.FieldValue.serverTimestamp(),
-                "appVersion" to "1.2"
+                "appVersion" to "1.3.1"
             )
             FirebaseFirestore.getInstance().collection("devices").document(uid)
                 .set(device, SetOptions.merge())
@@ -756,7 +791,7 @@ class MainActivity : Activity() {
             textSize = 13f
             setTextColor(col(R.color.text_sub))
             setPadding(dp(2), dp(8), dp(2), dp(4))
-            text = "اختر هاتفاً مرتبطاً ثم اطلب فتح الكاميرا أو الميكروفون."
+            text = "اختر هاتفاً مرتبطاً ثم اطلب فتح الكاميرا. بعد تفعيل البث اضغط «مشاهدة الكاميرا»."
         }
         val targetInfo = TextView(this).apply {
             textSize = 14f
@@ -764,9 +799,9 @@ class MainActivity : Activity() {
             setPadding(dp(2), dp(4), dp(2), dp(8))
             text = "لم يُحدد هاتف بعد"
         }
-        // نحتفظ بآخر targetUid مختار
         var selectedOwnerUid: String? = null
         var selectedOwnerName: String = ""
+        var lastFrameUrl: String? = null
 
         fun refreshStatusListener(ownerUid: String) {
             mediaStatusReg?.remove()
@@ -780,9 +815,11 @@ class MainActivity : Activity() {
                     val msg = snap.getString("message") ?: ""
                     val mode = snap.getString("mode") ?: ""
                     val req = snap.getString("requesterName") ?: ""
+                    val frame = snap.getString("frameUrl")
+                    if (!frame.isNullOrBlank()) lastFrameUrl = frame
                     statusTv.text = when (st) {
                         "pending" -> "بانتظار الجهاز الهدف… $msg"
-                        "active" -> "نشطة ($mode): $msg"
+                        "active" -> "نشطة ($mode): $msg" + if (!frame.isNullOrBlank()) " — لقطة جاهزة" else if (!snap.getString("audioUrl").isNullOrBlank()) " — صوت جاهز" else ""
                         "denied" -> "مرفوضة: $msg"
                         "stopped" -> "متوقفة: $msg"
                         "error" -> "خطأ: $msg"
@@ -817,6 +854,7 @@ class MainActivity : Activity() {
                                             when (cmd) {
                                                 "camera" -> "أُرسل طلب فتح الكاميرا"
                                                 "mic" -> "أُرسل طلب فتح الميكروفون"
+                                                "live" -> "أُرسل طلب البث المباشر"
                                                 else -> "أُرسل طلب الإيقاف"
                                             }
                                         )
@@ -831,6 +869,150 @@ class MainActivity : Activity() {
             }, { toast("فعّل الاتصال السحابي أولاً") })
         }
 
+        fun openCameraViewer() {
+            val uid = selectedOwnerUid
+            if (uid == null) {
+                toast("اختر هاتفاً أولاً عبر «فتح كاميرا»")
+                return
+            }
+            val img = ImageView(this).apply {
+                adjustViewBounds = true
+                scaleType = ImageView.ScaleType.FIT_CENTER
+                minimumHeight = dp(240)
+                setBackgroundColor(0xFF111111.toInt())
+                setPadding(dp(4), dp(4), dp(4), dp(4))
+            }
+            val info = TextView(this).apply {
+                text = "جارٍ انتظار اللقطات…"
+                textSize = 13f
+                setTextColor(col(R.color.text_sub))
+                setPadding(dp(8), dp(8), dp(8), dp(4))
+            }
+            val box = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(8), dp(8), dp(8), dp(8))
+                addView(info)
+                addView(img, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                ))
+            }
+            val dlg = AlertDialog.Builder(this)
+                .setTitle("كاميرا $selectedOwnerName")
+                .setView(box)
+                .setNegativeButton("إغلاق", null)
+                .show()
+
+            var viewReg: ListenerRegistration? = null
+            var lastLoaded: String? = null
+            fun loadUrl(url: String) {
+                if (url == lastLoaded) return
+                lastLoaded = url
+                Thread {
+                    try {
+                        val conn = java.net.URL(url).openConnection()
+                        conn.connectTimeout = 8000
+                        conn.readTimeout = 8000
+                        conn.getInputStream().use { stream ->
+                            val bmp = BitmapFactory.decodeStream(stream)
+                            runOnUiThread {
+                                if (dlg.isShowing && bmp != null) {
+                                    img.setImageBitmap(bmp)
+                                    info.text = "تحديث مباشر (لقطة كل ~1 ثانية)"
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        runOnUiThread {
+                            if (dlg.isShowing) info.text = "تعذّر تحميل اللقطة: ${e.message}"
+                        }
+                    }
+                }.start()
+            }
+            viewReg = FirebaseFirestore.getInstance().collection("media").document(uid)
+                .addSnapshotListener { snap, _ ->
+                    if (!dlg.isShowing) {
+                        viewReg?.remove()
+                        return@addSnapshotListener
+                    }
+                    val url = snap?.getString("frameUrl")
+                    if (!url.isNullOrBlank()) loadUrl(url)
+                    else info.text = "بانتظار أول لقطة من الجهاز الهدف…"
+                }
+            dlg.setOnDismissListener { viewReg?.remove() }
+            lastFrameUrl?.let { loadUrl(it) }
+        }
+
+
+        fun openMicListener() {
+            val uid = selectedOwnerUid
+            if (uid == null) {
+                toast("اختر هاتفاً أولاً عبر «فتح ميكروفون»")
+                return
+            }
+            val info = TextView(this).apply {
+                text = "جارٍ انتظار المقاطع الصوتية…"
+                textSize = 14f
+                setTextColor(col(R.color.text_sub))
+                setPadding(dp(12), dp(16), dp(12), dp(16))
+            }
+            var player: MediaPlayer? = null
+            var lastAudio: String? = null
+            var viewReg: ListenerRegistration? = null
+            val dlg = AlertDialog.Builder(this)
+                .setTitle("ميكروفون $selectedOwnerName")
+                .setView(info)
+                .setNegativeButton("إيقاف الاستماع") { _, _ ->
+                    try { player?.stop() } catch (_: Exception) {}
+                    try { player?.release() } catch (_: Exception) {}
+                    player = null
+                    viewReg?.remove()
+                }
+                .show()
+            fun playUrl(url: String) {
+                if (url == lastAudio) return
+                lastAudio = url
+                Thread {
+                    try {
+                        val old = player
+                        val mp = MediaPlayer()
+                        player = mp
+                        mp.setDataSource(url)
+                        mp.setOnPreparedListener {
+                            try { old?.release() } catch (_: Exception) {}
+                            try { it.start() } catch (_: Exception) {}
+                            runOnUiThread { if (dlg.isShowing) info.text = "يستمع الآن… (مقاطع ~كل ثانية)" }
+                        }
+                        mp.setOnCompletionListener {
+                            runOnUiThread { if (dlg.isShowing) info.text = "بانتظار المقطع التالي…" }
+                        }
+                        mp.setOnErrorListener { _, _, _ ->
+                            runOnUiThread { if (dlg.isShowing) info.text = "تعذّر تشغيل مقطع" }
+                            true
+                        }
+                        mp.prepareAsync()
+                    } catch (e: Exception) {
+                        runOnUiThread { if (dlg.isShowing) info.text = "خطأ: ${e.message}" }
+                    }
+                }.start()
+            }
+            viewReg = FirebaseFirestore.getInstance().collection("media").document(uid)
+                .addSnapshotListener { snap, _ ->
+                    if (!dlg.isShowing) {
+                        viewReg?.remove()
+                        try { player?.release() } catch (_: Exception) {}
+                        return@addSnapshotListener
+                    }
+                    val url = snap?.getString("audioUrl")
+                    if (!url.isNullOrBlank()) playUrl(url)
+                    else info.text = "بانتظار أول مقطع من الجهاز الهدف…"
+                }
+            dlg.setOnDismissListener {
+                viewReg?.remove()
+                try { player?.stop() } catch (_: Exception) {}
+                try { player?.release() } catch (_: Exception) {}
+            }
+        }
+
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             layoutParams = LinearLayout.LayoutParams(
@@ -838,15 +1020,29 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply { topMargin = dp(6) }
         }
+        row.addView(iconBtn("بث مباشر", R.color.primary) { pickOwnerAnd("live") })
         row.addView(iconBtn("فتح كاميرا", R.color.primary) { pickOwnerAnd("camera") })
         row.addView(iconBtn("فتح ميكروفون", R.color.accent) { pickOwnerAnd("mic") })
         row.addView(iconBtn("إيقاف", R.color.danger) { pickOwnerAnd("stop") })
 
         return card(
             sectionTitle("فتح الكاميرا والميكروفون عن بُعد"),
-            label("يعمل بعد الاقتران وموافقة صاحب الهاتف. يفتح العتاد على الجهاز الهدف ويظهر مؤشر النظام. البث المباشر للصوت/الفيديو عبر الشبكة غير مضمّن في هذه النسخة (يتطلب WebRTC)."),
+            label("للبث المتصل: اضغط «بث مباشر» ثم «مشاهدة مباشرة». يحتاج أذونات كاميرا+ميكروفون على الهدف. إن لم يظهر الفيديو على شبكات الجوال قد تحتاج خادم TURN لاحقاً."),
             targetInfo,
             row,
+            mbtn("مشاهدة مباشرة (فيديو+صوت)", filled = true) {
+                val uid = selectedOwnerUid
+                if (uid == null) {
+                    toast("اختر هاتفاً أولاً عبر «بث مباشر»")
+                } else {
+                    val i = Intent(this, LiveViewActivity::class.java)
+                    i.putExtra(LiveViewActivity.EXTRA_OWNER_UID, uid)
+                    i.putExtra(LiveViewActivity.EXTRA_NAME, selectedOwnerName)
+                    startActivity(i)
+                }
+            },
+            mbtn("مشاهدة الكاميرا (لقطات)", filled = true) { openCameraViewer() },
+            mbtn("استماع الميكروفون (مقاطع)", filled = true) { openMicListener() },
             statusTv,
             mbtn("بدء استماع الأوامر على هذا الهاتف", filled = false) {
                 if (FirebaseAuth.getInstance().currentUser == null) {
@@ -973,7 +1169,13 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun refresh() { when (current) { "setup" -> renderSetup(); "settings" -> renderSettings(); else -> {} } }
+    private fun refresh() {
+        when (current) {
+            "setup" -> renderSetup()
+            "settings" -> renderSettings(preserveScroll = true)
+            else -> {}
+        }
+    }
 
     private fun showOwnerInstructions() {
         val cmd = "adb shell dpm set-device-owner com.findphone.app/.AdminReceiver"

