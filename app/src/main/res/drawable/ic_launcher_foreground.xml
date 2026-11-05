@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+
+    <!-- دبّوس الموقع -->
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M54,32 C45.49,32 38.6,38.89 38.6,47.4 C38.6,58.95 54,76 54,76 C69.4,58.95 69.4,47.4 69.4,47.4 C69.4,38.89 62.51,32 54,32 Z"/>
+
+    <!-- هاتف صغير داخل رأس الدبّوس -->
+    <path android:fillColor="#0D3B66"
+        android:pathData="M50,38 h8 a3,3 0 0 1 3,3 v16 a3,3 0 0 1 -3,3 h-8 a3,3 0 0 1 -3,-3 v-16 a3,3 0 0 1 3,-3 Z"/>
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M53.6,40.6 m-1.1,0 a1.1,1.1 0 1,0 2.2,0 a1.1,1.1 0 1,0 -2.2,0"/>
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M50.4,56.2 h7.2 a0.9,0.9 0 0 1 0,1.8 h-7.2 a0.9,0.9 0 0 1 0,-1.8 Z"/>
+</vector>

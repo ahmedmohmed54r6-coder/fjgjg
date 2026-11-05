@@ -1,0 +1,56 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // سجل الجهاز: لصاحبه فقط
+    match /devices/{deviceUid} {
+      allow create, read, update, delete: if request.auth != null
+                                          && request.auth.uid == deviceUid;
+
+      // الهواتف التي أشاهدها (يكتبها المشاهِد لنفسه)
+      match /owners/{ownerUid} {
+        allow read, write: if request.auth != null && request.auth.uid == deviceUid;
+      }
+
+      // الهواتف المصرّح لها بمشاهدة موقعي (لا يكتبها إلا صاحب الهاتف بعد موافقته)
+      match /viewers/{viewerUid} {
+        allow read: if request.auth != null
+                    && (request.auth.uid == deviceUid || request.auth.uid == viewerUid);
+        allow create, update, delete: if request.auth != null
+                                      && request.auth.uid == deviceUid;
+      }
+    }
+
+    // آخر موقع: يكتبه صاحب الهاتف، ويقرؤه هو والمصرّح لهم فقط
+    match /locations/{ownerUid} {
+      allow create, update, delete: if request.auth != null && request.auth.uid == ownerUid;
+      allow read: if request.auth != null
+                  && (request.auth.uid == ownerUid
+                      || exists(/databases/$(database)/documents/devices/$(ownerUid)/viewers/$(request.auth.uid)));
+    }
+
+    // كود الاقتران: قراءة بالمعرّف فقط (لا قائمة)، ينتهي خلال 15 دقيقة كحدٍّ أقصى
+    match /pairings/{code} {
+      allow get: if request.auth != null;
+      allow list: if false;
+      allow create: if request.auth != null
+        && code.size() == 8
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.keys().hasOnly(['ownerUid', 'ownerName', 'expiresAt', 'claimedBy', 'claimerName'])
+        && request.resource.data.claimedBy == null
+        && request.resource.data.expiresAt is timestamp
+        && request.resource.data.expiresAt <= request.time + duration.value(15, 'm');
+      allow update: if request.auth != null
+        && resource.data.claimedBy == null
+        && resource.data.expiresAt > request.time
+        && request.auth.uid != resource.data.ownerUid
+        && request.resource.data.claimedBy == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['claimedBy', 'claimerName']);
+      allow delete: if request.auth != null && resource.data.ownerUid == request.auth.uid;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

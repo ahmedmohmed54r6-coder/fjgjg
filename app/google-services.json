@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "525952570994",
+    "project_id": "findphone-87b52",
+    "storage_bucket": "findphone-87b52.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:525952570994:android:973fba909b402bfad5d4eb",
+        "android_client_info": {
+          "package_name": "com.findphone1.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyC43VI43jYSGurCHg06H3m6V8iAWIDSzh0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:525952570994:android:5dbb4438a9a7241ed5d4eb",
+        "android_client_info": {
+          "package_name": "com.findphone2.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyC43VI43jYSGurCHg06H3m6V8iAWIDSzh0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
