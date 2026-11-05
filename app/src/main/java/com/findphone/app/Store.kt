@@ -46,6 +46,15 @@ class Store(c: Context) {
         get() = p.getLong("lock_until", 0)
         set(v) { p.edit().putLong("lock_until", v).apply() }
 
+    // موافقات محلية مستقلة لطلبات الوسائط عن بُعد. لا تعني تشغيل الكاميرا/الميكروفون.
+    var allowRemoteCamera: Boolean
+        get() = p.getBoolean("allow_remote_camera", false)
+        set(v) { p.edit().putBoolean("allow_remote_camera", v).apply() }
+
+    var allowRemoteMicrophone: Boolean
+        get() = p.getBoolean("allow_remote_microphone", false)
+        set(v) { p.edit().putBoolean("allow_remote_microphone", v).apply() }
+
     var adminActive: Boolean
         get() = p.getBoolean("admin", false)
         set(v) { p.edit().putBoolean("admin", v).apply() }

@@ -317,6 +317,7 @@ class MainActivity : Activity() {
         }
         root.addView(ownerCard())
         root.addView(viewerCard())
+        root.addView(mediaConsentCard())
 
         val kw = et("مثال: 123456789", s.keyword)
         root.addView(card(
@@ -678,6 +679,53 @@ class MainActivity : Activity() {
             }).also { it.start() }
     }
 
+
+    // إعدادات الموافقة المحلية على إمكانية طلب الوسائط.
+    // لا يبدأ هذا القسم الكاميرا أو الميكروفون ولا يتجاوز موافقات Android.
+    private fun mediaConsentCard(): View {
+        val camera = Switch(this).apply {
+            text = "السماح بطلب الكاميرا عن بُعد"
+            textSize = 14f
+            setTextColor(col(R.color.text_main))
+            isChecked = s.allowRemoteCamera
+            setOnCheckedChangeListener { _, checked ->
+                if (!checked) {
+                    s.allowRemoteCamera = false
+                    toast("تم منع طلب الكاميرا عن بُعد")
+                } else if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                    s.allowRemoteCamera = true
+                    toast("تم السماح بطلب الكاميرا عن بُعد")
+                } else {
+                    isChecked = false
+                    requestPermissions(arrayOf(Manifest.permission.CAMERA), 101)
+                }
+            }
+        }
+        val microphone = Switch(this).apply {
+            text = "السماح بطلب الميكروفون عن بُعد"
+            textSize = 14f
+            setTextColor(col(R.color.text_main))
+            isChecked = s.allowRemoteMicrophone
+            setOnCheckedChangeListener { _, checked ->
+                if (!checked) {
+                    s.allowRemoteMicrophone = false
+                    toast("تم منع طلب الميكروفون عن بُعد")
+                } else if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                    s.allowRemoteMicrophone = true
+                    toast("تم السماح بطلب الميكروفون عن بُعد")
+                } else {
+                    isChecked = false
+                    requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 102)
+                }
+            }
+        }
+        return card(
+            sectionTitle("التحكم في الوصول إلى الكاميرا والميكروفون"),
+            label("هذه مفاتيح موافقة محلية على الجهاز المقترن. إيقاف المفتاح يمنع التطبيق من اعتبار الوسيلة مسموحًا بها. يلزم منح إذن Android أيضًا. لا يبدأ تشغيل الوسائط أو البث بمجرد تفعيل المفتاح."),
+            camera, microphone
+        )
+    }
+
     // ---------- بطاقة الصلاحيات ----------
     private fun permsCard(title: String): LinearLayout {
         val ch = mutableListOf<View>(
@@ -880,6 +928,20 @@ class MainActivity : Activity() {
     }
 
     override fun onRequestPermissionsResult(rc: Int, perms: Array<out String>, res: IntArray) {
+        if (rc == 101) {
+            s.allowRemoteCamera = res.isNotEmpty() && res[0] == PackageManager.PERMISSION_GRANTED
+            toast(if (s.allowRemoteCamera) "تم السماح بطلب الكاميرا" else "لم يتم منح إذن الكاميرا")
+            current = "settings"
+            renderSettings()
+            return
+        }
+        if (rc == 102) {
+            s.allowRemoteMicrophone = res.isNotEmpty() && res[0] == PackageManager.PERMISSION_GRANTED
+            toast(if (s.allowRemoteMicrophone) "تم السماح بطلب الميكروفون" else "لم يتم منح إذن الميكروفون")
+            current = "settings"
+            renderSettings()
+            return
+        }
         if (rc == 1 && Build.VERSION.SDK_INT >= 29 &&
             checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED &&
             checkSelfPermission(Manifest.permission.ACCESS_BACKGROUND_LOCATION) != PackageManager.PERMISSION_GRANTED) {
