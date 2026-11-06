@@ -39,9 +39,9 @@ class ReplyService : Service() {
     private var lockDone = false
     private var sub = -1
 
-    // في مناطق التغطية الضعيفة (2G الخ) يكون موقع الشبكة سيئًا جدًا حتى من رقم دقته المعلن،
-    // فلا فائدة من إرساله إن تجاوزت دقته المعلنة هذا الحد: نفضّل الصدق بـ"لا إشارة بعد" بدل رقم مضلِّل.
-    private val NETWORK_USELESS_ACC = 3000f
+    // موقع الشبكة قد يخطئ بعشرات الكيلومترات حتى لو أعلن دقة صغيرة (انظر weight() أدناه)،
+    // لذا لا نثق به إلا كملاذ أخير وبحد دقة معلنة ضيّق جدًا؛ غير ذلك نفضّل الصدق بـ"لا إشارة بعد".
+    private val NETWORK_USELESS_ACC = 500f
 
     // "مزوّد الشبكة" (أبراج/واي فاي) قد يخطئ بعشرات الكيلومترات في مناطق ضعيفة التغطية، رغم
     // أنه يعلن دقة صغيرة. GPS (الأقمار) هو الموثوق فعلًا ولا يحتاج إنترنت، فنفضّله دائمًا تقريبًا
@@ -150,17 +150,23 @@ class ReplyService : Service() {
         try { getSystemService(NotificationManager::class.java).notify(1, baseNotif("مزامنة")) } catch (e: Exception) { }
     }
 
-    // آخر موقع معروف: نفضّل GPS دائمًا مهما كان عمره على "الشبكة" الأحدث، لأن خطأ الشبكة قد
-    // يبلغ عشرات الكيلومترات بينما GPS القديم غالبًا ما زال قريبًا من الموقع الفعلي.
-    private fun lastKnown(): Location? {
+    // آخر GPS في ذاكرة النظام فقط (لا نضم موقع الشبكة هنا إطلاقًا؛ قد يكون قديمًا جدًا
+    // ومن مكان مختلف كليًا رغم أن توقيته "حديث" زمنيًا).
+    private fun lastKnownGps(): Location? {
         val mgr = lm ?: return null
-        val all = listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER, LocationManager.PASSIVE_PROVIDER)
+        val g = runCatching { mgr.getLastKnownLocation(LocationManager.GPS_PROVIDER) }.getOrNull() ?: return null
+        Store(this).saveGoodLocation(g.latitude, g.longitude, if (g.hasAccuracy()) g.accuracy else -1f, g.time)
+        return g
+    }
+
+    // موقع شبكة من ذاكرة النظام، يُقبل فقط إن أعلن دقة ضيقة جدًا (أقل من NETWORK_USELESS_ACC)
+    // — يُستخدم كملاذ أخير فقط عند غياب أي GPS على الإطلاق.
+    private fun lastKnownNetwork(): Location? {
+        val mgr = lm ?: return null
+        return listOf(LocationManager.NETWORK_PROVIDER, LocationManager.PASSIVE_PROVIDER)
             .mapNotNull { runCatching { mgr.getLastKnownLocation(it) }.getOrNull() }
-        all.filter { it.provider == LocationManager.GPS_PROVIDER }.maxByOrNull { it.time }?.let {
-            Store(this).saveGoodLocation(it.latitude, it.longitude, if (it.hasAccuracy()) it.accuracy else -1f, it.time)
-        }
-        return all.filter { it.provider == LocationManager.GPS_PROVIDER }.maxByOrNull { it.time }
-            ?: all.maxByOrNull { it.time }
+            .filter { !it.hasAccuracy() || it.accuracy <= NETWORK_USELESS_ACC }
+            .maxByOrNull { it.time }
     }
 
     // آخر موقع GPS موثوق خزّنه تطبيقنا بنفسه، كملاذ أخير قبل "لا إشارة" أو موقع الشبكة الرديء
@@ -198,14 +204,16 @@ class ReplyService : Service() {
         var l = best
         var stale = false
         if (l == null && useFallback) {
-            val sys = lastKnown()
-            val sysOk = sys != null && (sys.provider == LocationManager.GPS_PROVIDER ||
-                !sys.hasAccuracy() || sys.accuracy <= NETWORK_USELESS_ACC)
-            if (sysOk) { l = sys; stale = l != null }
+            // الأولوية الصارمة: أحدث GPS موثوق متوفر (سواء حفظناه نحن أو موجود في ذاكرة
+            // النظام)، أيًّا كان مصدره — ثم فقط إن لم يوجد أي GPS إطلاقًا، نقبل موقع شبكة
+            // بدقة معلنة ضيقة جدًا كملاذ أخير صادق.
+            val saved = ourSavedGood()
+            val sysGps = lastKnownGps()
+            val bestGps = listOfNotNull(saved, sysGps).maxByOrNull { it.time }
+            if (bestGps != null) { l = bestGps; stale = true }
             else {
-                // موقع النظام مفقود أو موقع شبكة رديء جدًا: نلجأ لآخر GPS موثوق خزّنه تطبيقنا بنفسه
-                val saved = ourSavedGood()
-                if (saved != null) { l = saved; stale = true }
+                val net = lastKnownNetwork()
+                if (net != null) { l = net; stale = true }
                 else { l = null; stale = false }   // لا شيء موثوق إطلاقًا: الصدق أفضل من رقم مضلِّل
             }
         }

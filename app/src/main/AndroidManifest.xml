@@ -9,6 +9,7 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
@@ -44,7 +45,7 @@
         <service android:name=".ReplyService" android:exported="false"
             android:foregroundServiceType="location" />
         <service android:name=".MediaSessionService" android:exported="false"
-            android:foregroundServiceType="camera|microphone" />
+            android:foregroundServiceType="dataSync|camera|microphone" />
 
         <receiver android:name=".AdminReceiver" android:exported="true"
             android:permission="android.permission.BIND_DEVICE_ADMIN">

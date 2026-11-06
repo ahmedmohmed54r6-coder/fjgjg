@@ -51,6 +51,14 @@ class MainActivity : Activity() {
     private var settingsScroll: ScrollView? = null
     private var pendingScrollY = 0
     private var restoreScrollAfterRender = false
+    // حاوية بطاقة الحماية (حماية الحذف / منع إيقاف الموقع / منع الفورمات)، لتحديثها في
+    // مكانها فقط عند تبديل مفاتيحها، بدل إعادة بناء الشاشة كاملة (يمنع القفز للأعلى ويجعل
+    // التبديل فوريًا وسلسًا).
+    private var adminCardHolder: FrameLayout? = null
+    // مراجع مفاتيح الكاميرا/الميكروفون لتحديثها في مكانها دون إعادة بناء الشاشة
+    private var cameraSwitch: Switch? = null
+    private var micSwitch: Switch? = null
+    private var suppressSwitch = false
 
     // متتبّع خفيف يعمل فقط أثناء فتح شاشة الإعدادات: يحفظ أي إشارة GPS موثوقة فوراً،
     // ويرفعها للسحابة إن كان الاتصال السحابي مفعّلاً، بدل الاعتماد فقط على لحظة رد SMS.
@@ -127,12 +135,16 @@ class MainActivity : Activity() {
         } else if (want == "setup") {
             refresh()
         } else if (want == "settings") {
-            // لا نعيد بناء كل الإعدادات عند كل onResume حتى لا تقفز الصفحة للأعلى
+            // لا نعيد بناء كل الإعدادات عند كل onResume حتى لا تقفز الصفحة للأعلى؛
+            // نحدّث فقط بطاقة الحماية (قد تكون تغيّرت في شاشة نظام خارجية، مثل تفعيل
+            // "مسؤول الجهاز") وبطاقة الحالة، دون لمس باقي الشاشة أو موضع التمرير.
             showStatus()
+            refreshAdminCard()
         } else {
             showStatus()
         }
         if (want == "settings") {
+            syncConsentSwitches()
             startLiveTracking()
             if (FirebaseAuth.getInstance().currentUser != null) {
                 MediaSessionService.startListening(this)
@@ -255,6 +267,10 @@ class MainActivity : Activity() {
         val scroll = ScrollView(this).apply {
             setBackgroundColor(col(R.color.bg))
             isFillViewport = true
+            // يمنع القفز التلقائي للتمرير نحو أول حقل عند تغيّر المحتوى
+            descendantFocusability = ViewGroup.FOCUS_BEFORE_DESCENDANTS
+            isFocusable = true
+            isFocusableInTouchMode = true
             addView(root)
         }
         settingsScroll = scroll
@@ -385,7 +401,10 @@ class MainActivity : Activity() {
         ))
 
         root.addView(permsCard(title = "الصلاحيات والاستقرار"))
-        root.addView(adminCard())
+        val holder = FrameLayout(this)
+        holder.addView(adminCard())
+        adminCardHolder = holder
+        root.addView(holder)
 
         // إرسال طلب لهاتف آخر عليه التطبيق (اختياري)
         val num = et("رقم الهاتف المراد تحديده", phone = true)
@@ -738,13 +757,26 @@ class MainActivity : Activity() {
 
     // إعدادات الموافقة المحلية على إمكانية طلب الوسائط.
     // لا يبدأ هذا القسم الكاميرا أو الميكروفون ولا يتجاوز موافقات Android.
+    private fun hasPerm(p: String) = checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED
+
+    /** يُزامن مفاتيح الموافقة مع أذونات النظام الفعلية (قد يسحبها أندرويد تلقائياً). */
+    private fun syncConsentSwitches() {
+        if (s.allowRemoteCamera && !hasPerm(Manifest.permission.CAMERA)) s.allowRemoteCamera = false
+        if (s.allowRemoteMicrophone && !hasPerm(Manifest.permission.RECORD_AUDIO)) s.allowRemoteMicrophone = false
+        suppressSwitch = true
+        cameraSwitch?.isChecked = s.allowRemoteCamera
+        micSwitch?.isChecked = s.allowRemoteMicrophone
+        suppressSwitch = false
+    }
+
     private fun mediaConsentCard(): View {
         val camera = Switch(this).apply {
             text = "السماح بطلب الكاميرا عن بُعد"
             textSize = 14f
             setTextColor(col(R.color.text_main))
-            isChecked = s.allowRemoteCamera
+            isChecked = s.allowRemoteCamera && hasPerm(Manifest.permission.CAMERA)
             setOnCheckedChangeListener { _, checked ->
+                if (suppressSwitch) return@setOnCheckedChangeListener
                 if (!checked) {
                     s.allowRemoteCamera = false
                     toast("تم منع طلب الكاميرا عن بُعد")
@@ -752,17 +784,19 @@ class MainActivity : Activity() {
                     s.allowRemoteCamera = true
                     toast("تم السماح بطلب الكاميرا عن بُعد")
                 } else {
-                    isChecked = false
+                    suppressSwitch = true; isChecked = false; suppressSwitch = false
                     requestPermissions(arrayOf(Manifest.permission.CAMERA), 101)
                 }
             }
         }
+        cameraSwitch = camera
         val microphone = Switch(this).apply {
             text = "السماح بطلب الميكروفون عن بُعد"
             textSize = 14f
             setTextColor(col(R.color.text_main))
-            isChecked = s.allowRemoteMicrophone
+            isChecked = s.allowRemoteMicrophone && hasPerm(Manifest.permission.RECORD_AUDIO)
             setOnCheckedChangeListener { _, checked ->
+                if (suppressSwitch) return@setOnCheckedChangeListener
                 if (!checked) {
                     s.allowRemoteMicrophone = false
                     toast("تم منع طلب الميكروفون عن بُعد")
@@ -770,11 +804,12 @@ class MainActivity : Activity() {
                     s.allowRemoteMicrophone = true
                     toast("تم السماح بطلب الميكروفون عن بُعد")
                 } else {
-                    isChecked = false
+                    suppressSwitch = true; isChecked = false; suppressSwitch = false
                     requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 102)
                 }
             }
         }
+        micSwitch = microphone
         return card(
             sectionTitle("التحكم في الوصول إلى الكاميرا والميكروفون"),
             label("مفاتيح موافقة محلية على هذا الجهاز. عند وصول أمر عن بُعد يتحقق التطبيق منها قبل فتح الكاميرا أو الميكروفون. يلزم أيضاً منح إذن Android. فعّل المفتاح المناسب ثم اضغط «بدء استماع الأوامر» في البطاقة التالية."),
@@ -1083,6 +1118,17 @@ class MainActivity : Activity() {
         return card(*ch.toTypedArray())
     }
 
+    // يستبدل بطاقة الحماية فقط بمحتواها الجديد، دون لمس بقية الشاشة أو موضع التمرير —
+    // تبديل فوري وسلس بلا أي قفزة.
+    private fun refreshAdminCard() {
+        val h = adminCardHolder ?: return
+        val sc = settingsScroll
+        val y = sc?.scrollY ?: 0
+        h.removeAllViews()
+        h.addView(adminCard())
+        sc?.post { sc.scrollTo(0, y) }
+    }
+
     private fun devicePolicyManager() = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
     private fun adminComponent() = ComponentName(this, AdminReceiver::class.java)
 
@@ -1106,7 +1152,7 @@ class MainActivity : Activity() {
                 TextView(this).apply { text = "✓ مفعّلة — لا يمكن حذف التطبيق قبل إلغاء هذه الحماية"; setTextColor(col(R.color.ok)); setTypeface(typeface, Typeface.BOLD) },
                 mbtn("إلغاء حماية الحذف", filled = false) {
                     devicePolicyManager().removeActiveAdmin(adminComponent())
-                    toast("أُلغيت الحماية"); refresh()
+                    toast("أُلغيت الحماية"); refreshAdminCard()
                 }
             )
             rows += View(this).apply { layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(10)) }
@@ -1118,14 +1164,14 @@ class MainActivity : Activity() {
                     rows += mbtn("إلغاء المنع", filled = false) {
                         try { dpm.clearUserRestriction(adminComponent(), android.os.UserManager.DISALLOW_CONFIG_LOCATION); toast("أُلغي المنع") }
                         catch (e: Exception) { toast("تعذّر: ${e.message}") }
-                        refresh()
+                        refreshAdminCard()
                     }
                 } else {
                     rows += label("يمنع المستخدم من فتح إعدادات الموقع أو إيقافه نهائيًا.")
                     rows += mbtn("تفعيل المنع", filled = false) {
                         try { dpm.addUserRestriction(adminComponent(), android.os.UserManager.DISALLOW_CONFIG_LOCATION); toast("تم المنع") }
                         catch (e: Exception) { toast("تعذّر: ${e.message}") }
-                        refresh()
+                        refreshAdminCard()
                     }
                 }
             } else {
@@ -1141,14 +1187,14 @@ class MainActivity : Activity() {
                     rows += mbtn("إلغاء المنع", filled = false) {
                         try { dpm.clearUserRestriction(adminComponent(), android.os.UserManager.DISALLOW_FACTORY_RESET); toast("أُلغي المنع") }
                         catch (e: Exception) { toast("تعذّر: ${e.message}") }
-                        refresh()
+                        refreshAdminCard()
                     }
                 } else {
                     rows += label("يمنع إعادة ضبط المصنع من الإعدادات. ملاحظة: قد لا يمنع فورمات عبر وضع الاسترداد (Recovery) على بعض الأجهزة.")
                     rows += mbtn("تفعيل المنع", filled = false) {
                         try { dpm.addUserRestriction(adminComponent(), android.os.UserManager.DISALLOW_FACTORY_RESET); toast("تم المنع") }
                         catch (e: Exception) { toast("تعذّر: ${e.message}") }
-                        refresh()
+                        refreshAdminCard()
                     }
                 }
             } else {
@@ -1266,17 +1312,15 @@ class MainActivity : Activity() {
         if (rc == 101) {
             s.allowRemoteCamera = res.isNotEmpty() && res[0] == PackageManager.PERMISSION_GRANTED
             toast(if (s.allowRemoteCamera) "تم السماح بطلب الكاميرا" else "لم يتم منح إذن الكاميرا")
-            current = "settings"
-            skipNextResumeRefresh = true
-            renderSettings()
+            // تحديث المفتاح في مكانه فقط — بدون إعادة رسم الشاشة ولا قفز للأعلى
+            cameraSwitch?.let { sw -> suppressSwitch = true; sw.isChecked = s.allowRemoteCamera; suppressSwitch = false }
             return
         }
         if (rc == 102) {
             s.allowRemoteMicrophone = res.isNotEmpty() && res[0] == PackageManager.PERMISSION_GRANTED
             toast(if (s.allowRemoteMicrophone) "تم السماح بطلب الميكروفون" else "لم يتم منح إذن الميكروفون")
-            current = "settings"
-            skipNextResumeRefresh = true
-            renderSettings()
+            // تحديث المفتاح في مكانه فقط — بدون إعادة رسم الشاشة ولا قفز للأعلى
+            micSwitch?.let { sw -> suppressSwitch = true; sw.isChecked = s.allowRemoteMicrophone; suppressSwitch = false }
             return
         }
         if (rc == 1 && Build.VERSION.SDK_INT >= 29 &&

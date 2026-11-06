@@ -54,6 +54,7 @@ class WebRtcLive(private val ctx: Context) {
     private var remoteRenderer: SurfaceViewRenderer? = null
     private val pendingRemoteIce = mutableListOf<IceCandidate>()
     private var remoteDescSet = false
+    private var lastOffer: String? = null
 
     var onStatus: ((String) -> Unit)? = null
     var onError: ((String) -> Unit)? = null
@@ -77,14 +78,24 @@ class WebRtcLive(private val ctx: Context) {
     private fun iceServers(): List<PeerConnection.IceServer> = listOf(
         PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
         PeerConnection.IceServer.builder("stun:stun1.l.google.com:19302").createIceServer(),
-        PeerConnection.IceServer.builder("stun:stun2.l.google.com:19302").createIceServer()
+        PeerConnection.IceServer.builder("stun:stun2.l.google.com:19302").createIceServer(),
+        // TURN عام تجريبي: استبدله بخادم TURN خاص بك (Metered/Twilio/coturn) لضمان الاتصال عبر شبكات الجوال
+        PeerConnection.IceServer.builder(listOf(
+            "turn:openrelay.metered.ca:80",
+            "turn:openrelay.metered.ca:443",
+            "turn:openrelay.metered.ca:443?transport=tcp"
+        )).setUsername("openrelayproject").setPassword("openrelayproject").createIceServer()
     )
 
     private fun pcObserver() = object : PeerConnection.Observer {
         override fun onSignalingChange(state: PeerConnection.SignalingState?) {}
         override fun onIceConnectionChange(state: PeerConnection.IceConnectionState?) {
-            onStatus?.invoke("ICE: $state")
             Log.d(tag, "iceConnection $state")
+            if (state == PeerConnection.IceConnectionState.FAILED) {
+                onStatus?.invoke("فشل الاتصال المباشر (غالباً الشبكة تحتاج خادم TURN)")
+            } else {
+                onStatus?.invoke("ICE: $state")
+            }
         }
         override fun onIceConnectionReceivingChange(p0: Boolean) {}
         override fun onIceGatheringChange(state: PeerConnection.IceGatheringState?) {}
@@ -198,9 +209,18 @@ class WebRtcLive(private val ctx: Context) {
         exec.execute {
             try {
                 initFactory()
-                renderer.init(egl!!.eglBaseContext, null)
-                renderer.setMirror(false)
-                renderer.setEnableHardwareScaler(true)
+                val initLatch = java.util.concurrent.CountDownLatch(1)
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    try {
+                        renderer.init(egl!!.eglBaseContext, null)
+                        renderer.setMirror(false)
+                        renderer.setEnableHardwareScaler(true)
+                    } catch (e: Exception) {
+                        onError?.invoke("فشل تهيئة العرض: ${e.message}")
+                    }
+                    initLatch.countDown()
+                }
+                initLatch.await()
                 createPeer()
                 // نستقبل فيديو وصوت
                 val constraints = MediaConstraints().apply {
@@ -222,7 +242,14 @@ class WebRtcLive(private val ctx: Context) {
                 if (snap == null || !snap.exists()) return@addSnapshotListener
                 val offer = snap.getString("offer") ?: return@addSnapshotListener
                 val type = snap.getString("offerType") ?: "offer"
-                if (pc?.remoteDescription != null) return@addSnapshotListener
+                if (offer == lastOffer) return@addSnapshotListener
+                if (pc?.remoteDescription != null) {
+                    // عرض جديد بعد قديم (جلسة سابقة): أعد بناء الاتصال
+                    try { pc?.close() } catch (_: Exception) {}
+                    remoteDescSet = false
+                    createPeer()
+                }
+                lastOffer = offer
                 val sdp = SessionDescription(
                     SessionDescription.Type.fromCanonicalForm(type), offer
                 )
@@ -282,6 +309,7 @@ class WebRtcLive(private val ctx: Context) {
             .addSnapshotListener { qs, _ ->
                 if (qs == null) return@addSnapshotListener
                 for (doc in qs.documentChanges) {
+                    if (doc.type != com.google.firebase.firestore.DocumentChange.Type.ADDED) continue
                     val d = doc.document
                     val from = d.getString("from") ?: continue
                     // تجاهل مرشحاتنا نحن
@@ -336,6 +364,7 @@ class WebRtcLive(private val ctx: Context) {
         try { remoteRenderer?.release() } catch (_: Exception) {}
         remoteRenderer = null
         remoteDescSet = false
+        lastOffer = null
         pendingRemoteIce.clear()
         if (ownerUid.isNotEmpty() && role == "pub") {
             try {

