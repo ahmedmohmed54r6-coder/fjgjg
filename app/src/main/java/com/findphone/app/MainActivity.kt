@@ -875,7 +875,7 @@ class MainActivity : Activity() {
         micSwitch = microphone
         return card(
             sectionTitle("التحكم في الوصول إلى الكاميرا والميكروفون"),
-            label("مفاتيح موافقة محلية على هذا الجهاز. عند وصول أمر عن بُعد يتحقق التطبيق منها قبل فتح الكاميرا أو الميكروفون. يلزم أيضاً منح إذن Android. فعّل المفتاح المناسب ثم اضغط «بدء استماع الأوامر» في البطاقة التالية."),
+            label("مفاتيح موافقة محلية على هذا الجهاز. عند وصول أمر عن بُعد يتحقق التطبيق منها قبل فتح الكاميرا أو الميكروفون. يلزم أيضاً منح إذن Android. فعّل المفتاح المناسب. الاستماع للأوامر يعمل تلقائياً بعد تفعيل الاتصال السحابي."),
             camera, microphone
         )
     }
@@ -1137,14 +1137,6 @@ class MainActivity : Activity() {
             mbtn("مشاهدة الكاميرا (لقطات)", filled = true) { openCameraViewer() },
             mbtn("استماع الميكروفون (مقاطع)", filled = true) { openMicListener() },
             statusTv,
-            mbtn("بدء استماع الأوامر على هذا الهاتف", filled = false) {
-                if (FirebaseAuth.getInstance().currentUser == null) {
-                    toast("فعّل الاتصال السحابي أولاً")
-                } else {
-                    MediaSessionService.startListening(this)
-                    toast("جاري الاستماع لأوامر الوسائط في الخلفية")
-                }
-            }
         )
     }
 

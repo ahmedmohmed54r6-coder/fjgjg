@@ -406,11 +406,17 @@ class MediaSessionService : Service() {
     private fun openLive(ownerUid: String): Boolean {
         return try {
             try { webRtcLive?.stop() } catch (_: Exception) {}
-            webRtcLive = WebRtcLive(this).also { w ->
+            webRtcLive = WebRtcLive(applicationContext).also { w ->
                 w.onStatus = { msg -> updateStatus(ownerUid, "active", msg) }
                 w.onError = { msg ->
                     updateStatus(ownerUid, "error", msg)
-                    mainHandler.post { stopSession("error", msg) }
+                    // لا نوقف فوراً على كل خطأ عابر؛ نوقف عند فشل جسيم فقط
+                    if (msg.contains("فشل البث") || msg.contains("لا توجد كاميرا") || msg.contains("تعذّر")) {
+                        mainHandler.post { stopSession("error", msg) }
+                    }
+                }
+                w.onConnected = {
+                    updateStatus(ownerUid, "active", "البث متصل ✓")
                 }
                 w.startPublisher(ownerUid)
             }
