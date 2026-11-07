@@ -1,17 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="bg">#0E1420</color>
-    <color name="surface">#161F2E</color>
-    <color name="stroke">#283346</color>
-    <color name="primary">#4FA3E3</color>
-    <color name="primary_dark">#0D3B66</color>
-    <color name="accent">#4FA3E3</color>
-    <color name="on_primary">#0B2A4A</color>
-    <color name="text_main">#EAF0F7</color>
-    <color name="text_sub">#9FB0C3</color>
-    <color name="ok">#4CC08A</color>
-    <color name="ok_bg">#123526</color>
-    <color name="warn">#FF6B6B</color>
-    <color name="warn_bg">#3A1818</color>
-    <color name="danger">#FF6B6B</color>
+    <color name="bg">#0B1220</color>
+    <color name="surface">#152033</color>
+    <color name="stroke">#2A3A52</color>
+    <color name="primary">#5BA3F0</color>
+    <color name="primary_dark">#1A56A0</color>
+    <color name="primary_soft">#1A2F4A</color>
+    <color name="accent">#2DD4BF</color>
+    <color name="accent_soft">#123530</color>
+    <color name="on_primary">#0B1220</color>
+    <color name="text_main">#F1F5F9</color>
+    <color name="text_sub">#94A3B8</color>
+    <color name="ok">#34D399</color>
+    <color name="ok_bg">#0F2E22</color>
+    <color name="warn">#FB7185</color>
+    <color name="warn_bg">#3B151C</color>
+    <color name="danger">#FB7185</color>
+    <color name="header_start">#1A56A0</color>
+    <color name="header_end">#0F766E</color>
 </resources>

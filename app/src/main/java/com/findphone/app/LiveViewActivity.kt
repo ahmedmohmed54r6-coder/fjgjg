@@ -22,7 +22,7 @@ class LiveViewActivity : Activity() {
         val name = intent.getStringExtra(EXTRA_NAME) ?: "بث مباشر"
 
         val status = TextView(this).apply {
-            text = "جارٍ الاتصال…"
+            text = "جارٍ الاتصال…\nتأكد أن الهدف ضغط «بدء استماع الأوامر» وأن البث المباشر أُرسل"
             setTextColor(Color.WHITE)
             textSize = 14f
             setPadding(24, 24, 24, 12)

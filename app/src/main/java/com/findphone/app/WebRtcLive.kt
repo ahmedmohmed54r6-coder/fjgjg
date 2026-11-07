@@ -1,6 +1,8 @@
 package com.findphone.app
 
 import android.content.Context
+import android.media.AudioManager
+import android.os.Build
 import android.util.Log
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
@@ -79,22 +81,22 @@ class WebRtcLive(private val ctx: Context) {
         PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
         PeerConnection.IceServer.builder("stun:stun1.l.google.com:19302").createIceServer(),
         PeerConnection.IceServer.builder("stun:stun2.l.google.com:19302").createIceServer(),
-        // TURN عام تجريبي: استبدله بخادم TURN خاص بك (Metered/Twilio/coturn) لضمان الاتصال عبر شبكات الجوال
-        PeerConnection.IceServer.builder(listOf(
-            "turn:openrelay.metered.ca:80",
-            "turn:openrelay.metered.ca:443",
-            "turn:openrelay.metered.ca:443?transport=tcp"
-        )).setUsername("openrelayproject").setPassword("openrelayproject").createIceServer()
+        PeerConnection.IceServer.builder("stun:stun.cloudflare.com:3478").createIceServer()
     )
 
     private fun pcObserver() = object : PeerConnection.Observer {
         override fun onSignalingChange(state: PeerConnection.SignalingState?) {}
         override fun onIceConnectionChange(state: PeerConnection.IceConnectionState?) {
-            Log.d(tag, "iceConnection $state")
-            if (state == PeerConnection.IceConnectionState.FAILED) {
-                onStatus?.invoke("فشل الاتصال المباشر (غالباً الشبكة تحتاج خادم TURN)")
-            } else {
-                onStatus?.invoke("ICE: $state")
+            android.util.Log.d("WebRtcLive", "iceConnection $state")
+            when (state) {
+                PeerConnection.IceConnectionState.FAILED ->
+                    onStatus?.invoke("فشل ICE — جرّب نفس الـ Wi‑Fi أو خادم TURN")
+                PeerConnection.IceConnectionState.CONNECTED,
+                PeerConnection.IceConnectionState.COMPLETED ->
+                    onStatus?.invoke("متصل ✓")
+                PeerConnection.IceConnectionState.CHECKING ->
+                    onStatus?.invoke("جاري التفاوض…")
+                else -> onStatus?.invoke("ICE: $state")
             }
         }
         override fun onIceConnectionReceivingChange(p0: Boolean) {}
@@ -102,7 +104,7 @@ class WebRtcLive(private val ctx: Context) {
         override fun onIceCandidate(c: IceCandidate?) {
             if (c == null || ownerUid.isEmpty()) return
             val data = hashMapOf(
-                "sdpMid" to c.sdpMid,
+                "sdpMid" to (c.sdpMid ?: ""),
                 "sdpMLineIndex" to c.sdpMLineIndex,
                 "candidate" to c.sdp,
                 "from" to role,
@@ -113,16 +115,18 @@ class WebRtcLive(private val ctx: Context) {
                 .set(data)
         }
         override fun onIceCandidatesRemoved(p0: Array<out IceCandidate>?) {}
-        override fun onAddStream(stream: MediaStream?) {
-            // legacy
-        }
+        override fun onAddStream(stream: MediaStream?) {}
         override fun onRemoveStream(p0: MediaStream?) {}
         override fun onDataChannel(p0: DataChannel?) {}
         override fun onRenegotiationNeeded() {}
         override fun onAddTrack(receiver: RtpReceiver?, streams: Array<out MediaStream>?) {
             val track = receiver?.track() ?: return
-            if (track.kind() == "video" && track is VideoTrack) {
+            track.setEnabled(true)
+            if (track is VideoTrack) {
                 remoteRenderer?.let { track.addSink(it) }
+                onStatus?.invoke("فيديو وصل")
+            } else {
+                onStatus?.invoke("صوت وصل")
             }
         }
         override fun onConnectionChange(newState: PeerConnection.PeerConnectionState?) {
@@ -206,6 +210,11 @@ class WebRtcLive(private val ctx: Context) {
         this.ownerUid = ownerUid
         this.role = "view"
         this.remoteRenderer = renderer
+        try {
+            val am = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            am.mode = AudioManager.MODE_IN_COMMUNICATION
+            am.isSpeakerphoneOn = true
+        } catch (_: Exception) {}
         exec.execute {
             try {
                 initFactory()

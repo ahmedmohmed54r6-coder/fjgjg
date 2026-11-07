@@ -10,15 +10,15 @@ android {
         applicationId "com.findphone2.app"
         minSdk 26
         targetSdk 34
-        versionCode 7
-        versionName "1.4"
+        versionCode 9
+        versionName "1.4.2"
         // الهواتف فقط: يستبعد x86/x86_64 (يوفّر نحو نصف حجم مكتبة WebRTC)
         ndk { abiFilters 'arm64-v8a', 'armeabi-v7a' }
     }
     buildTypes {
         release {
-            minifyEnabled true
-            shrinkResources true
+            minifyEnabled false
+            shrinkResources false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }

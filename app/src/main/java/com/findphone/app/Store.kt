@@ -59,6 +59,22 @@ class Store(c: Context) {
         get() = p.getBoolean("admin", false)
         set(v) { p.edit().putBoolean("admin", v).apply() }
 
+    /** جلسة فتح الإعدادات بالـ PIN — لا تُفقد عند حوار الأذونات أو إعادة إنشاء النشاط */
+    var sessionUnlockedUntil: Long
+        get() = p.getLong("session_unlocked_until", 0L)
+        set(v) { p.edit().putLong("session_unlocked_until", v).apply() }
+
+    fun markSessionUnlocked(minutes: Int = 45) {
+        sessionUnlockedUntil = System.currentTimeMillis() + minutes * 60_000L
+    }
+
+    fun clearSessionUnlock() {
+        sessionUnlockedUntil = 0L
+    }
+
+    fun isSessionUnlocked(): Boolean =
+        System.currentTimeMillis() < sessionUnlockedUntil
+
     // آخر موقع GPS موثوق نجحنا بالتقاطه، نحتفظ به نحن بمعزل عن ذاكرة أندرويد
     // (التي قد تُمسح عند إغلاق/تشغيل الموقع)، لنستخدمه كملاذ قبل الاستسلام أو اللجوء للشبكة.
     fun saveGoodLocation(lat: Double, lng: Double, acc: Float, time: Long) {

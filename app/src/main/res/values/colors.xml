@@ -1,17 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="bg">#F3F6FA</color>
+    <!-- خلفية ناعمة مزرقة -->
+    <color name="bg">#F0F4F8</color>
     <color name="surface">#FFFFFF</color>
-    <color name="stroke">#E3E8EF</color>
-    <color name="primary">#0D3B66</color>
-    <color name="primary_dark">#082A4A</color>
-    <color name="accent">#1E88E5</color>
+    <color name="stroke">#D8E0EA</color>
+    <!-- أساسي: أزرق عميق أنيق -->
+    <color name="primary">#1A56A0</color>
+    <color name="primary_dark">#0F3A70</color>
+    <color name="primary_soft">#E8F1FB</color>
+    <!-- تمييز: فيروزي حي -->
+    <color name="accent">#0D9488</color>
+    <color name="accent_soft">#E6FAF7</color>
     <color name="on_primary">#FFFFFF</color>
-    <color name="text_main">#17202A</color>
-    <color name="text_sub">#5B6B7C</color>
-    <color name="ok">#1E8E5A</color>
-    <color name="ok_bg">#E4F6EC</color>
-    <color name="warn">#C62828</color>
-    <color name="warn_bg">#FCEAEA</color>
-    <color name="danger">#D64545</color>
+    <color name="text_main">#0F172A</color>
+    <color name="text_sub">#64748B</color>
+    <color name="ok">#059669</color>
+    <color name="ok_bg">#ECFDF5</color>
+    <color name="warn">#DC2626</color>
+    <color name="warn_bg">#FEF2F2</color>
+    <color name="danger">#E11D48</color>
+    <color name="header_start">#1A56A0</color>
+    <color name="header_end">#0D9488</color>
 </resources>

@@ -48,6 +48,8 @@ class MainActivity : Activity() {
     private var current = ""
     private var stoppedAt = 0L
     private var skipNextResumeRefresh = false
+    /** true أثناء حوار أذونات النظام — يمنع قفل PIN وإعادة رسم الشاشة */
+    private var awaitingPermission = false
     private var settingsScroll: ScrollView? = null
     private var pendingScrollY = 0
     private var restoreScrollAfterRender = false
@@ -112,8 +114,21 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        // يُقفل تلقائيًا إذا غادرت التطبيق أكثر من 30 ثانية
-        if (unlocked && stoppedAt > 0 && System.currentTimeMillis() - stoppedAt > 30_000) unlocked = false
+        // استرجع جلسة PIN المحفوظة (لا تضيع عند حوار الكاميرا/الميكروفون)
+        if (!unlocked && s.isSessionUnlocked()) unlocked = true
+        // لا تُقفل أثناء طلب إذن النظام، ولا إن كانت الجلسة ما زالت سارية
+        if (!awaitingPermission && unlocked && stoppedAt > 0
+            && System.currentTimeMillis() - stoppedAt > 30_000
+            && !s.isSessionUnlocked()
+        ) {
+            unlocked = false
+            s.clearSessionUnlock()
+        }
+        if (awaitingPermission) {
+            awaitingPermission = false
+            unlocked = true
+            s.markSessionUnlocked()
+        }
         val want = when {
             !s.hasPin -> "setup"
             !unlocked -> "lock"
@@ -168,10 +183,11 @@ class MainActivity : Activity() {
     private fun toast(t: String) = Toast.makeText(this, t, Toast.LENGTH_LONG).show()
 
     private fun sectionTitle(t: String) = TextView(this).apply {
-        text = t; textSize = 13f; setTypeface(typeface, Typeface.BOLD)
-        setTextColor(col(R.color.text_sub))
-        setPadding(dp(4), 0, dp(4), dp(10))
-        letterSpacing = 0.02f
+        text = t
+        textSize = 15f
+        setTypeface(typeface, Typeface.BOLD)
+        setTextColor(col(R.color.primary))
+        setPadding(0, 0, 0, dp(10))
     }
 
     private fun label(t: String) = TextView(this).apply {
@@ -183,7 +199,7 @@ class MainActivity : Activity() {
         val c = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             background = ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_card)
-            setPadding(dp(18), dp(18), dp(18), dp(18))
+            setPadding(dp(20), dp(20), dp(20), dp(20))
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
                 .apply { bottomMargin = dp(16) }
         }
@@ -204,39 +220,84 @@ class MainActivity : Activity() {
     private fun mbtn(t: String, filled: Boolean = true, f: () -> Unit): MaterialButton {
         val style = if (filled) MatR.attr.materialButtonStyle else MatR.attr.materialButtonOutlinedStyle
         return MaterialButton(this, null, style).apply {
-            text = t; textSize = 14f; isAllCaps = false
-            cornerRadius = dp(14)
-            insetTop = 0; insetBottom = 0
-            setPadding(dp(16), dp(12), dp(16), dp(12))
+            text = t
+            textSize = 15f
+            isAllCaps = false
+            cornerRadius = dp(16)
+            insetTop = 0
+            insetBottom = 0
+            minHeight = dp(50)
+            setPadding(dp(18), dp(14), dp(18), dp(14))
             if (filled) {
                 backgroundTintList = android.content.res.ColorStateList.valueOf(col(R.color.primary))
                 setTextColor(col(R.color.on_primary))
             } else {
-                strokeColor = android.content.res.ColorStateList.valueOf(col(R.color.stroke))
+                strokeColor = android.content.res.ColorStateList.valueOf(col(R.color.primary))
                 strokeWidth = dp(1)
                 setTextColor(col(R.color.primary))
+                backgroundTintList = android.content.res.ColorStateList.valueOf(col(R.color.primary_soft))
             }
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-                .apply { topMargin = dp(6) }
+                .apply { topMargin = dp(8) }
             setOnClickListener { f() }
         }
     }
 
     private fun iconBtn(t: String, bg: Int, f: () -> Unit) = MaterialButton(this, null, MatR.attr.materialButtonStyle).apply {
-        text = t; textSize = 13f; isAllCaps = false; cornerRadius = dp(12)
-        insetTop = 0; insetBottom = 0
-        setPadding(dp(14), dp(8), dp(14), dp(8))
+        text = t
+        textSize = 13.5f
+        isAllCaps = false
+        cornerRadius = dp(16)
+        insetTop = 0
+        insetBottom = 0
+        minHeight = dp(52)
+        maxLines = 2
+        setPadding(dp(10), dp(14), dp(10), dp(14))
         backgroundTintList = android.content.res.ColorStateList.valueOf(col(bg))
         setTextColor(Color.WHITE)
-        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(8) }
+        // وزن متساوٍ مع هامش متناسق — لا يضغط النص
+        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+            marginEnd = dp(6)
+            marginStart = dp(6)
+        }
         setOnClickListener { f() }
+    }
+
+    /** صفّان من زرّين لتجنب ضغط النص العربي الطويل */
+    private fun actionGrid(vararg pairs: Pair<String, Pair<Int, () -> Unit>>): LinearLayout {
+        val wrap = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(8) }
+        }
+        pairs.toList().chunked(2).forEach { rowPairs ->
+            val row = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { bottomMargin = dp(8) }
+            }
+            rowPairs.forEach { (label, pack) ->
+                val (colorId, action) = pack
+                row.addView(iconBtn(label, colorId, action))
+            }
+            // إن كان زراً واحداً في الصف، املأ المساحة بشكل مريح
+            if (rowPairs.size == 1) {
+                row.addView(View(this@MainActivity).apply {
+                    layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
+                })
+            }
+            wrap.addView(row)
+        }
+        return wrap
     }
 
     private fun header(sub: String): View {
         val wrap = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             background = GradientDrawable(GradientDrawable.Orientation.TL_BR,
-                intArrayOf(col(R.color.accent), col(R.color.primary_dark))).apply { cornerRadius = dp(22).toFloat() }
+                intArrayOf(col(R.color.header_start), col(R.color.header_end))).apply { cornerRadius = dp(24).toFloat() }
             setPadding(dp(20), dp(24), dp(20), dp(24))
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
                 .apply { bottomMargin = dp(18) }
@@ -351,8 +412,9 @@ class MainActivity : Activity() {
         if (wait > 0) { msg.text = "محاولات كثيرة، انتظر ${wait / 1000 + 1} ثانية"; return }
         if (s.checkPin(pin.text.toString())) {
             s.failCount = 0
-            unlocked = true; current = "settings"
-            renderSettings()
+            unlocked = true; s.markSessionUnlocked()
+            current = "settings"
+            renderSettings(preserveScroll = false)
         } else {
             val f = s.failCount + 1
             s.failCount = f
@@ -410,14 +472,11 @@ class MainActivity : Activity() {
         val num = et("رقم الهاتف المراد تحديده", phone = true)
         val st = TextView(this).apply { textSize = 13f; setTextColor(col(R.color.text_sub)); setPadding(dp(2), dp(8), dp(2), 0) }
         sendStatusTv = st
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-                .apply { topMargin = dp(6) }
-        }
-        row.addView(iconBtn("طلب الموقع", R.color.primary) { sendRequest(num.text.toString(), "") })
-        row.addView(iconBtn("رنين", R.color.accent) { sendRequest(num.text.toString(), " ring") })
-        row.addView(iconBtn("قفل", R.color.danger) { sendRequest(num.text.toString(), " lock") })
+        val row = actionGrid(
+            "طلب الموقع" to (R.color.primary to { sendRequest(num.text.toString(), "") }),
+            "رنين" to (R.color.accent to { sendRequest(num.text.toString(), " ring") }),
+            "قفل" to (R.color.danger to { sendRequest(num.text.toString(), " lock") })
+        )
         root.addView(card(
             sectionTitle("طلب موقع هاتف آخر (اختياري)"),
             label("يرسل الكلمة السرية إلى هاتف عليه التطبيق بنفس الكلمة، ويصلك الرد برسالة نصية فيها رابط الخريطة. « قفل » يُقفل شاشة ذلك الهاتف فورًا (يتطلب تفعيل «حماية الحذف» على الهاتف الآخر)."),
@@ -440,7 +499,7 @@ class MainActivity : Activity() {
         ))
 
         root.addView(mbtn("قفل التطبيق الآن") {
-            unlocked = false; current = "lock"; renderLock()
+            unlocked = false; s.clearSessionUnlock(); current = "lock"; renderLock()
         })
         showStatus()
     }
@@ -785,6 +844,8 @@ class MainActivity : Activity() {
                     toast("تم السماح بطلب الكاميرا عن بُعد")
                 } else {
                     suppressSwitch = true; isChecked = false; suppressSwitch = false
+                    awaitingPermission = true
+                    s.markSessionUnlocked()
                     requestPermissions(arrayOf(Manifest.permission.CAMERA), 101)
                 }
             }
@@ -805,6 +866,8 @@ class MainActivity : Activity() {
                     toast("تم السماح بطلب الميكروفون عن بُعد")
                 } else {
                     suppressSwitch = true; isChecked = false; suppressSwitch = false
+                    awaitingPermission = true
+                    s.markSessionUnlocked()
                     requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 102)
                 }
             }
@@ -1048,23 +1111,18 @@ class MainActivity : Activity() {
             }
         }
 
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = dp(6) }
-        }
-        row.addView(iconBtn("بث مباشر", R.color.primary) { pickOwnerAnd("live") })
-        row.addView(iconBtn("فتح كاميرا", R.color.primary) { pickOwnerAnd("camera") })
-        row.addView(iconBtn("فتح ميكروفون", R.color.accent) { pickOwnerAnd("mic") })
-        row.addView(iconBtn("إيقاف", R.color.danger) { pickOwnerAnd("stop") })
+        val grid = actionGrid(
+            "بث مباشر" to (R.color.primary to { pickOwnerAnd("live") }),
+            "فتح كاميرا" to (R.color.accent to { pickOwnerAnd("camera") }),
+            "فتح ميكروفون" to (R.color.accent to { pickOwnerAnd("mic") }),
+            "إيقاف" to (R.color.danger to { pickOwnerAnd("stop") })
+        )
 
         return card(
             sectionTitle("فتح الكاميرا والميكروفون عن بُعد"),
             label("للبث المتصل: اضغط «بث مباشر» ثم «مشاهدة مباشرة». يحتاج أذونات كاميرا+ميكروفون على الهدف. إن لم يظهر الفيديو على شبكات الجوال قد تحتاج خادم TURN لاحقاً."),
             targetInfo,
-            row,
+            grid,
             mbtn("مشاهدة مباشرة (فيديو+صوت)", filled = true) {
                 val uid = selectedOwnerUid
                 if (uid == null) {
@@ -1305,21 +1363,25 @@ class MainActivity : Activity() {
             Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION,
             Manifest.permission.READ_PHONE_STATE)
         if (Build.VERSION.SDK_INT >= 33) l += Manifest.permission.POST_NOTIFICATIONS
+        awaitingPermission = true
+        s.markSessionUnlocked()
         requestPermissions(l.toTypedArray(), 1)
     }
 
     override fun onRequestPermissionsResult(rc: Int, perms: Array<out String>, res: IntArray) {
+        awaitingPermission = false
+        unlocked = true
+        s.markSessionUnlocked()
         if (rc == 101) {
             s.allowRemoteCamera = res.isNotEmpty() && res[0] == PackageManager.PERMISSION_GRANTED
             toast(if (s.allowRemoteCamera) "تم السماح بطلب الكاميرا" else "لم يتم منح إذن الكاميرا")
-            // تحديث المفتاح في مكانه فقط — بدون إعادة رسم الشاشة ولا قفز للأعلى
+            // تحديث المفتاح فقط — بدون إعادة رسم الشاشة (لا اهتزاز/قفز)
             cameraSwitch?.let { sw -> suppressSwitch = true; sw.isChecked = s.allowRemoteCamera; suppressSwitch = false }
             return
         }
         if (rc == 102) {
             s.allowRemoteMicrophone = res.isNotEmpty() && res[0] == PackageManager.PERMISSION_GRANTED
             toast(if (s.allowRemoteMicrophone) "تم السماح بطلب الميكروفون" else "لم يتم منح إذن الميكروفون")
-            // تحديث المفتاح في مكانه فقط — بدون إعادة رسم الشاشة ولا قفز للأعلى
             micSwitch?.let { sw -> suppressSwitch = true; sw.isChecked = s.allowRemoteMicrophone; suppressSwitch = false }
             return
         }
